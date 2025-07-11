@@ -22,17 +22,16 @@ HEADERS = {
     "Accept": "application/json"
 }
 ALERT_TEMPLATE = "https://apis.intangles.com/alertlog/logsV2/{start_ts}/{end_ts}"
+REFRESH_INTERVAL = 10
 
-# === State Setup ===
+# === Page Setup ===
 st.set_page_config(page_title="Blue Energy Alerts", layout="wide")
 st.title("🔔 Blue Energy Motors Alert Dashboard")
-
-refresh_interval = 10
 
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = time.time()
 if "seen_alerts" not in st.session_state:
-    st.session_state.seen_alerts = set()
+    st.session_state.seen_alerts = {}
 
 # === Serial Tracking ===
 def normalize_key(timestamp, vehicle_tag, code):
@@ -104,58 +103,61 @@ def process_alerts(alerts):
             "Vehicle Tag": vehicle_tag,
             "DTC Code": code,
             "Severity": severity,
-            "Description": dtc_info.get("description", "")
+            "Description": dtc_info.get("description", ""),
+            "Seen": st.session_state.seen_alerts.get(log_id, False)
         }
         output.append(row)
 
     save_serial_map(serial_map)
     return output
 
-# === Auto-Refresh and UI ===
+# === Refresh Control UI ===
 auto = st.sidebar.toggle("🔄 Auto-Refresh", value=True)
 countdown = st.sidebar.empty()
 
 elapsed = time.time() - st.session_state.last_refresh
-remaining = refresh_interval - int(elapsed)
-if auto:
-    if remaining <= 0:
+remaining = REFRESH_INTERVAL - int(elapsed)
+
+if st.sidebar.button("🔁 Manual Refresh"):
+    st.session_state.last_refresh = time.time()
+    st.rerun()
+
+placeholder = st.empty()
+
+# === Main Display Refresh Loop ===
+with placeholder.container():
+    if auto and remaining <= 0:
         st.session_state.last_refresh = time.time()
-        st.experimental_rerun()
-    else:
+        st.rerun()
+    elif auto:
         countdown.info(f"Refreshing in {remaining}s")
 
-if st.button("🔁 Manual Refresh"):
-    st.session_state.last_refresh = time.time()
-    st.experimental_rerun()
+    alerts = get_alert_logs()
+    data = process_alerts(alerts)
 
-# === Fetch and Display ===
-alerts = get_alert_logs()
-data = process_alerts(alerts)
-
-if not data:
-    st.info("No alerts found.")
-else:
-    df = pd.DataFrame(data).sort_values("S.No.", ascending=False)
-    st.dataframe(df, use_container_width=True, height=600)
-
-    if not os.path.exists(HISTORY_CSV):
-        with open(HISTORY_CSV, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=data[0].keys())
-            writer.writeheader()
-            writer.writerows(data)
+    if not data:
+        st.info("No alerts found.")
     else:
-        with open(HISTORY_CSV, "a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=data[0].keys())
-            writer.writerows(data)
+        df = pd.DataFrame(data).sort_values("S.No.", ascending=False)
+        edited_df = st.data_editor(df, use_container_width=True, num_rows="dynamic", key="editor")
 
-    st.success("✅ Data saved to alert_history.csv")
+        # Update session state for Seen
+        for _, row in edited_df.iterrows():
+            st.session_state.seen_alerts[row["Log ID"]] = row["Seen"]
 
-# Show IST Timestamp
-ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
-st.markdown(f"✅ Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
+        # Save to CSV
+        if not os.path.exists(HISTORY_CSV):
+            with open(HISTORY_CSV, "w", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=df.columns)
+                writer.writeheader()
+                writer.writerows(df.to_dict(orient="records"))
+        else:
+            with open(HISTORY_CSV, "a", newline="", encoding="utf-8") as f:
+                writer = csv.DictWriter(f, fieldnames=df.columns)
+                writer.writerows(df.to_dict(orient="records"))
 
-# Inject auto-refresh meta tag if enabled
-if auto:
-    st.markdown("""
-        <meta http-equiv="refresh" content="10">
-    """, unsafe_allow_html=True)
+        st.success("✅ Data saved to alert_history.csv")
+
+    # IST time
+    ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    st.markdown(f"✅ Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
