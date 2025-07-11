@@ -73,7 +73,14 @@ def get_alert_logs():
     }
     url = ALERT_TEMPLATE.format(start_ts=start_ts, end_ts=end_ts)
     response = requests.get(url, headers=HEADERS, params=params)
-    return response.json().get("logs", [])
+    st.write("API Status Code:", response.status_code)
+    try:
+        data = response.json()
+        st.write("API Response JSON:", data)
+        return data.get("logs", [])
+    except Exception as e:
+        st.error(f"Failed to parse JSON response: {e}")
+        return []
 
 # === Process Alerts ===
 def process_alerts(alerts):
