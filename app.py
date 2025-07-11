@@ -1,10 +1,18 @@
+# app.py
 import streamlit as st
 import requests
 import json
 import time
+import csv
+import os
 from datetime import datetime, timedelta, timezone
 
-# === CONFIGURATION ===
+# === File Paths ===
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+HISTORY_CSV = os.path.join(BASE_DIR, "alert_history.csv")
+SERIAL_TRACK_FILE = os.path.join(BASE_DIR, "serial_tracker.json")
+
+# === Config ===
 USER_TOKEN = "QyXSX360esEHoVmge2VTwstx6oIE6xdXe7aKwWUXfkz18wlhe01byby4rfRnJFne"
 ACCOUNT_ID = "962759605811675136"
 HEADERS = {
@@ -15,14 +23,45 @@ HEADERS = {
 OBD_TEMPLATE = "https://apis.intangles.com/vehicle/{}/getLastFewObdData"
 ALERT_TEMPLATE = "https://apis.intangles.com/alertlog/logsV2/{start_ts}/{end_ts}"
 
-# === FUNCTIONS ===
-@st.cache_data(ttl=60)
+# === State Setup ===
+st.set_page_config(page_title="Blue Energy Alerts", layout="wide")
+st.title("🔔 Blue Energy Motors Alert Dashboard")
+
+refresh_interval = 10
+
+if "last_refresh" not in st.session_state:
+    st.session_state.last_refresh = time.time()
+if "seen_alerts" not in st.session_state:
+    st.session_state.seen_alerts = set()
+
+# === Serial Tracking ===
+def normalize_key(timestamp, vehicle_tag, code):
+    return f"{int(timestamp)}_{vehicle_tag.strip().upper()}_{code.strip().upper()}"
+
+def load_serial_map():
+    if os.path.exists(SERIAL_TRACK_FILE):
+        with open(SERIAL_TRACK_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_serial_map(map_data):
+    with open(SERIAL_TRACK_FILE, "w") as f:
+        json.dump(map_data, f, indent=2)
+
+serial_map = load_serial_map()
+
+# === API Functions ===
+def format_ist(ts_ms):
+    dt_utc = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+    dt_ist = dt_utc + timedelta(hours=5, minutes=30)
+    return dt_ist.strftime("%Y-%m-%d %H:%M:%S")
+
 def get_alert_logs():
     end_ts = int(time.time() * 1000)
-    start_ts = end_ts - 2 * 60 * 60 * 1000  # last 2 hours
+    start_ts = end_ts - 2 * 60 * 60 * 1000
     params = {
         "pnum": "1",
-        "psize": "20",
+        "psize": "50",
         "show_group": "true",
         "types": "dtc",
         "sort": "timestamp desc",
@@ -36,7 +75,6 @@ def get_alert_logs():
     response = requests.get(url, headers=HEADERS, params=params)
     return response.json().get("logs", [])
 
-@st.cache_data(ttl=60)
 def get_obd_data(vehicle_id):
     url = OBD_TEMPLATE.format(vehicle_id)
     params = {"packet_count": 3, "acc_id": ACCOUNT_ID, "lang": "en"}
@@ -46,7 +84,6 @@ def get_obd_data(vehicle_id):
         "Coolant Temp (°C)": "N/A",
         "Wheel Speed (kmph)": "N/A"
     }
-
     try:
         r = requests.get(url, headers=HEADERS, params=params)
         packets = r.json().get("results") or []
@@ -56,87 +93,105 @@ def get_obd_data(vehicle_id):
                 summary["Battery Voltage (V)"] = round(float(battery["voltage"]), 1)
             for p in pkt.get("pids", []):
                 for pid, d in p.items():
-                    value = d.get("value")
-                    if isinstance(value, list):
-                        value = value[0] if value else None
-                    if value is not None:
+                    val = d.get("value")
+                    if isinstance(val, list):
+                        val = val[0] if val else None
+                    if val is not None:
                         try:
-                            value = round(float(value), 1)
+                            val = round(float(val), 1)
                         except:
                             pass
-                        if pid == "84": summary["Wheel Speed (kmph)"] = value
-                        elif pid == "110": summary["Coolant Temp (°C)"] = value
-                        elif pid == "158": summary["Battery Voltage (V)"] = value
-                        elif pid == "190": summary["Engine Speed (RPM)"] = value
+                        if pid == "84": summary["Wheel Speed (kmph)"] = val
+                        elif pid == "110": summary["Coolant Temp (°C)"] = val
+                        elif pid == "158": summary["Battery Voltage (V)"] = val
+                        elif pid == "190": summary["Engine Speed (RPM)"] = val
     except:
         pass
     return summary
 
-def format_ist(ts_ms):
-    dt_utc = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
-    dt_ist = dt_utc + timedelta(hours=5, minutes=30)
-    return dt_ist.strftime("%Y-%m-%d %H:%M:%S")
-
+# === Process Alerts ===
 def process_alerts(alerts):
-    rows = []
-    for alert in alerts:
-        ts = alert.get("timestamp", 0)
-        vehicle_id = alert.get("vehicle_id", "")
-        vehicle_tag = alert.get("vehicle_tag", alert.get("vehicle_plate", ""))
-        code = alert.get("dtcs", {}).get("code", "")
-        severity = {1: "LOW", 2: "HIGH", 3: "CRITICAL"}.get(alert.get("dtcs", {}).get("severity_level", 1), "LOW")
-        dtc_info = alert.get("dtc_info", [{}])[0]
+    output = []
+    current_serials = set(serial_map.values())
+    new_serial = max(current_serials, default=0) + 1
+
+    for log in alerts:
+        vehicle_id = log.get("vehicle_id", "")
+        timestamp = log.get("timestamp", 0)
+        log_id = log.get("id", "")
+        code = log.get("dtcs", {}).get("code", "")
+        vehicle_tag = log.get("vehicle_tag", log.get("vehicle_plate", ""))
+        unique_key = normalize_key(timestamp, vehicle_tag, code)
+
+        serial_no = serial_map.get(unique_key)
+        if serial_no is None:
+            serial_no = new_serial
+            serial_map[unique_key] = serial_no
+            new_serial += 1
+
+        dtc_info = log.get("dtc_info", [{}])[0]
+        severity = {1: "LOW", 2: "HIGH", 3: "CRITICAL"}.get(log.get("dtcs", {}).get("severity_level", 1), "LOW")
         obd = get_obd_data(vehicle_id)
 
-        rows.append({
-            "Timestamp (IST)": format_ist(ts),
+        row = {
+            "S.No.": serial_no,
+            "Log ID": log_id,
+            "Timestamp": format_ist(timestamp),
             "Vehicle Tag": vehicle_tag,
             "DTC Code": code,
             "Severity": severity,
-            "Location": alert.get("address", ""),
             "Description": dtc_info.get("description", ""),
             **obd
-        })
-    return rows
+        }
+        output.append(row)
 
-# === STREAMLIT UI ===
-st.set_page_config(page_title="Blue Energy Alerts", layout="wide")
-st.title("🔔 Blue Energy Motors Alert Dashboard")
+    save_serial_map(serial_map)
+    return output
 
-# === Auto-refresh Settings ===
-refresh_interval_sec = 10
+# === Auto-Refresh and UI ===
+auto = st.sidebar.toggle("🔄 Auto-Refresh", value=True)
+countdown = st.sidebar.empty()
 
-# Toggle to enable/disable auto-refresh
-auto_refresh = st.sidebar.toggle("🔄 Enable Auto-Refresh", value=True)
-countdown_placeholder = st.sidebar.empty()
-
-# Timer logic
-if auto_refresh:
-    if "last_refresh" not in st.session_state:
-        st.session_state.last_refresh = time.time()
-
-    elapsed = time.time() - st.session_state.last_refresh
-    remaining = refresh_interval_sec - int(elapsed)
+elapsed = time.time() - st.session_state.last_refresh
+remaining = refresh_interval - int(elapsed)
+if auto:
     if remaining <= 0:
         st.session_state.last_refresh = time.time()
         st.experimental_rerun()
     else:
-        countdown_placeholder.info(f"Auto-refresh in {remaining} seconds...")
+        countdown.info(f"Refreshing in {remaining}s")
 
-# Manual refresh button
-if st.button("🔁 Refresh Now"):
+if st.button("🔁 Manual Refresh"):
     st.session_state.last_refresh = time.time()
     st.experimental_rerun()
 
-# === Fetch and Display Data ===
-with st.spinner("Fetching latest alerts..."):
-    alerts = get_alert_logs()
-    data = process_alerts(alerts)
-
-# === Display Table ===
+# === Fetch and Display ===
 st.markdown(f"✅ Last Updated: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`")
+alerts = get_alert_logs()
+data = process_alerts(alerts)
 
 if not data:
-    st.info("No alerts found in the past 2 hours.")
+    st.info("No alerts found.")
 else:
-    st.dataframe(data, use_container_width=True)
+    for row in data:
+        with st.expander(f"🚨 Alert {row['S.No.']}: {row['Vehicle Tag']} [{row['Severity']}]"):
+            st.write(row)
+            key = row['Log ID']
+            if key in st.session_state.seen_alerts:
+                st.success("✅ Marked as Seen")
+            else:
+                if st.button("Mark as Seen", key=f"btn_{key}"):
+                    st.session_state.seen_alerts.add(key)
+
+    # Save to CSV
+    if not os.path.exists(HISTORY_CSV):
+        with open(HISTORY_CSV, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=data[0].keys())
+            writer.writeheader()
+            writer.writerows(data)
+    else:
+        with open(HISTORY_CSV, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=data[0].keys())
+            writer.writerows(data)
+
+    st.success("✅ Data saved to alert_history.csv")
