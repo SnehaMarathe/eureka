@@ -53,7 +53,7 @@ serial_map = load_serial_map()
 # === API Functions ===
 def format_ist(ts_ms):
     dt_utc = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
-    dt_ist = dt_utc + timedelta(hours=5, 30)
+    dt_ist = dt_utc + timedelta(hours=5, minutes=30)
     return dt_ist.strftime("%Y-%m-%d %H:%M:%S")
 
 def get_alert_logs():
@@ -129,33 +129,4 @@ if st.button("🔁 Manual Refresh"):
     st.experimental_rerun()
 
 # === Fetch and Display ===
-alerts = get_alert_logs()
-data = process_alerts(alerts)
-
-if not data:
-    st.info("No alerts found.")
-else:
-    df = pd.DataFrame(data).sort_values("S.No.", ascending=False)
-    st.dataframe(df, use_container_width=True, height=600)
-
-    if not os.path.exists(HISTORY_CSV):
-        with open(HISTORY_CSV, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=data[0].keys())
-            writer.writeheader()
-            writer.writerows(data)
-    else:
-        with open(HISTORY_CSV, "a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=data[0].keys())
-            writer.writerows(data)
-
-    st.success("✅ Data saved to alert_history.csv")
-
-# Show IST Timestamp
-ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
-st.markdown(f"✅ Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
-
-# Inject auto-refresh meta tag if enabled
-if auto:
-    st.markdown("""
-        <meta http-equiv="refresh" content="10">
-    """, unsafe_allow_html=True)
+alerts = g
