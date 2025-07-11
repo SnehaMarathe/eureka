@@ -21,7 +21,6 @@ HEADERS = {
     "intangles-session-type": "web",
     "Accept": "application/json"
 }
-OBD_TEMPLATE = "https://apis.intangles.com/vehicle/{}/getLastFewObdData"
 ALERT_TEMPLATE = "https://apis.intangles.com/alertlog/logsV2/{start_ts}/{end_ts}"
 
 # === State Setup ===
@@ -29,7 +28,6 @@ st.set_page_config(page_title="Blue Energy Alerts", layout="wide")
 st.title("🔔 Blue Energy Motors Alert Dashboard")
 
 refresh_interval = 10
-MAX_OBD_LOOKUPS = 10  # Limit OBD lookups per refresh to speed things up
 
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = time.time()
@@ -77,48 +75,13 @@ def get_alert_logs():
     response = requests.get(url, headers=HEADERS, params=params)
     return response.json().get("logs", [])
 
-def get_obd_data(vehicle_id):
-    url = OBD_TEMPLATE.format(vehicle_id)
-    params = {"packet_count": 3, "acc_id": ACCOUNT_ID, "lang": "en"}
-    summary = {
-        "Battery Voltage (V)": "N/A",
-        "Engine Speed (RPM)": "N/A",
-        "Coolant Temp (°C)": "N/A",
-        "Wheel Speed (kmph)": "N/A"
-    }
-    try:
-        r = requests.get(url, headers=HEADERS, params=params)
-        packets = r.json().get("results") or []
-        for pkt in packets:
-            battery = pkt.get("battery")
-            if battery and "voltage" in battery:
-                summary["Battery Voltage (V)"] = round(float(battery["voltage"]), 1)
-            for p in pkt.get("pids", []):
-                for pid, d in p.items():
-                    val = d.get("value")
-                    if isinstance(val, list):
-                        val = val[0] if val else None
-                    if val is not None:
-                        try:
-                            val = round(float(val), 1)
-                        except:
-                            pass
-                        if pid == "84": summary["Wheel Speed (kmph)"] = val
-                        elif pid == "110": summary["Coolant Temp (°C)"] = val
-                        elif pid == "158": summary["Battery Voltage (V)"] = val
-                        elif pid == "190": summary["Engine Speed (RPM)"] = val
-    except:
-        pass
-    return summary
-
 # === Process Alerts ===
 def process_alerts(alerts):
     output = []
     current_serials = set(serial_map.values())
     new_serial = max(current_serials, default=0) + 1
 
-    for i, log in enumerate(alerts):
-        vehicle_id = log.get("vehicle_id", "")
+    for log in alerts:
         timestamp = log.get("timestamp", 0)
         log_id = log.get("id", "")
         code = log.get("dtcs", {}).get("code", "")
@@ -134,13 +97,6 @@ def process_alerts(alerts):
         dtc_info = log.get("dtc_info", [{}])[0]
         severity = {1: "LOW", 2: "HIGH", 3: "CRITICAL"}.get(log.get("dtcs", {}).get("severity_level", 1), "LOW")
 
-        obd = get_obd_data(vehicle_id) if i < MAX_OBD_LOOKUPS else {
-            "Battery Voltage (V)": "-",
-            "Engine Speed (RPM)": "-",
-            "Coolant Temp (°C)": "-",
-            "Wheel Speed (kmph)": "-"
-        }
-
         row = {
             "S.No.": serial_no,
             "Log ID": log_id,
@@ -148,8 +104,7 @@ def process_alerts(alerts):
             "Vehicle Tag": vehicle_tag,
             "DTC Code": code,
             "Severity": severity,
-            "Description": dtc_info.get("description", ""),
-            **obd
+            "Description": dtc_info.get("description", "")
         }
         output.append(row)
 
