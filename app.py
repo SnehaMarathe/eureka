@@ -5,6 +5,7 @@ import json
 import time
 import csv
 import os
+import pandas as pd
 from datetime import datetime, timedelta, timezone
 
 # === File Paths ===
@@ -173,15 +174,8 @@ data = process_alerts(alerts)
 if not data:
     st.info("No alerts found.")
 else:
-    for row in data:
-        with st.expander(f"🚨 Alert {row['S.No.']}: {row['Vehicle Tag']} [{row['Severity']}]"):
-            st.write(row)
-            key = row['Log ID']
-            if key in st.session_state.seen_alerts:
-                st.success("✅ Marked as Seen")
-            else:
-                if st.button("Mark as Seen", key=f"btn_{key}"):
-                    st.session_state.seen_alerts.add(key)
+    df = pd.DataFrame(data).sort_values("S.No.", ascending=False)
+    st.dataframe(df, use_container_width=True, height=600)
 
     # Save to CSV
     if not os.path.exists(HISTORY_CSV):
