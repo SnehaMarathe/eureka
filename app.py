@@ -29,6 +29,7 @@ st.set_page_config(page_title="Blue Energy Alerts", layout="wide")
 st.title("🔔 Blue Energy Motors Alert Dashboard")
 
 refresh_interval = 10
+MAX_OBD_LOOKUPS = 10  # Limit OBD lookups per refresh to speed things up
 
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = time.time()
@@ -54,7 +55,7 @@ serial_map = load_serial_map()
 # === API Functions ===
 def format_ist(ts_ms):
     dt_utc = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
-    dt_ist = dt_utc + timedelta(hours=5, minutes=30)
+    dt_ist = dt_utc + timedelta(hours=5, 30)
     return dt_ist.strftime("%Y-%m-%d %H:%M:%S")
 
 def get_alert_logs():
@@ -116,7 +117,7 @@ def process_alerts(alerts):
     current_serials = set(serial_map.values())
     new_serial = max(current_serials, default=0) + 1
 
-    for log in alerts:
+    for i, log in enumerate(alerts):
         vehicle_id = log.get("vehicle_id", "")
         timestamp = log.get("timestamp", 0)
         log_id = log.get("id", "")
@@ -132,7 +133,13 @@ def process_alerts(alerts):
 
         dtc_info = log.get("dtc_info", [{}])[0]
         severity = {1: "LOW", 2: "HIGH", 3: "CRITICAL"}.get(log.get("dtcs", {}).get("severity_level", 1), "LOW")
-        obd = get_obd_data(vehicle_id)
+
+        obd = get_obd_data(vehicle_id) if i < MAX_OBD_LOOKUPS else {
+            "Battery Voltage (V)": "-",
+            "Engine Speed (RPM)": "-",
+            "Coolant Temp (°C)": "-",
+            "Wheel Speed (kmph)": "-"
+        }
 
         row = {
             "S.No.": serial_no,
@@ -193,7 +200,7 @@ ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
 st.markdown(f"✅ Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
 
 # Inject auto-refresh meta tag if enabled
-#if auto:
-#    st.markdown("""
-#        <meta http-equiv="refresh" content="10">
-#    """, unsafe_allow_html=True)
+if auto:
+    st.markdown("""
+        <meta http-equiv="refresh" content="10">
+    """, unsafe_allow_html=True)
