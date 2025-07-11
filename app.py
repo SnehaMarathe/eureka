@@ -167,7 +167,8 @@ if st.button("🔁 Manual Refresh"):
     st.experimental_rerun()
 
 # === Fetch and Display ===
-st.markdown(f"✅ Last Updated: `{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}`")
+ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
+st.markdown(f"✅ Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
 alerts = get_alert_logs()
 data = process_alerts(alerts)
 
