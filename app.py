@@ -24,8 +24,8 @@ HEADERS = {
 ALERT_TEMPLATE = "https://apis.intangles.com/alertlog/logsV2/{start_ts}/{end_ts}"
 
 # === Streamlit Config ===
-st.set_page_config(page_title="Blue Energy Alerts", layout="wide")
-st.title("🔔 Blue Energy Motors Alert Dashboard")
+st.set_page_config(page_title="Alerts", layout="wide")
+st.title("🔔 Alert Dashboard")
 
 # === Refresh Control ===
 refresh_interval = 10  # in seconds
