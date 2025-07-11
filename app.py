@@ -2,11 +2,11 @@
 import streamlit as st
 import requests
 import json
-import time
 import csv
 import os
 import pandas as pd
 from datetime import datetime, timedelta, timezone
+from streamlit_autorefresh import st_autorefresh
 
 # === File Paths ===
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -27,9 +27,13 @@ ALERT_TEMPLATE = "https://apis.intangles.com/alertlog/logsV2/{start_ts}/{end_ts}
 st.set_page_config(page_title="Blue Energy Alerts", layout="wide")
 st.title("🔔 Blue Energy Motors Alert Dashboard")
 
-# === Session State Setup ===
-if "last_refresh" not in st.session_state:
-    st.session_state.last_refresh = time.time()
+# === Refresh Control ===
+refresh_interval = 10  # in seconds
+auto = st.sidebar.toggle("🔄 Auto-Refresh", value=True)
+
+if auto:
+    st_autorefresh(interval=refresh_interval * 1000, key="auto_refresh")
+
 if "seen_alerts" not in st.session_state:
     st.session_state.seen_alerts = set()
 
@@ -49,16 +53,15 @@ def save_serial_map(map_data):
 
 serial_map = load_serial_map()
 
-# === Utility Functions ===
+# === Utility ===
 def format_ist(ts_ms):
     dt_utc = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
     dt_ist = dt_utc + timedelta(hours=5, minutes=30)
     return dt_ist.strftime("%Y-%m-%d %H:%M:%S")
 
-# === API Fetch ===
 def get_alert_logs():
-    end_ts = int(time.time() * 1000)
-    start_ts = end_ts - 2 * 60 * 60 * 1000  # last 2 hours
+    end_ts = int(datetime.utcnow().timestamp() * 1000)
+    start_ts = end_ts - 2 * 60 * 60 * 1000
     params = {
         "pnum": "1",
         "psize": "50",
@@ -75,7 +78,6 @@ def get_alert_logs():
     response = requests.get(url, headers=HEADERS, params=params)
     return response.json().get("logs", [])
 
-# === Process Alerts ===
 def process_alerts(alerts):
     output = []
     current_serials = set(serial_map.values())
@@ -114,29 +116,7 @@ def process_alerts(alerts):
     save_serial_map(serial_map)
     return output
 
-# === Sidebar: Auto-Refresh & Manual Refresh ===
-refresh_interval = 10
-auto = st.sidebar.toggle("🔄 Auto-Refresh", value=True)
-countdown = st.sidebar.empty()
-
-if st.sidebar.button("🔁 Manual Refresh"):
-    st.session_state.last_refresh = time.time()
-    st.experimental_rerun()
-
-# === Countdown and Trigger Refresh ===
-if auto:
-    elapsed = time.time() - st.session_state.last_refresh
-    remaining = refresh_interval - int(elapsed)
-
-    if remaining <= 0:
-        st.session_state.last_refresh = time.time()
-        st.experimental_rerun()
-    else:
-        countdown.info(f"Refreshing in {remaining}s")
-        time.sleep(1)
-        st.experimental_rerun()
-
-# === Fetch & Display Data ===
+# === Fetch and Display ===
 alerts = get_alert_logs()
 data = process_alerts(alerts)
 
@@ -145,7 +125,7 @@ if not data:
 else:
     df = pd.DataFrame(data).sort_values("S.No.", ascending=False)
 
-    # Toggle "Seen" status
+    # Seen Toggle
     for i, row in df.iterrows():
         log_id = row["Log ID"]
         col1, col2 = st.columns([8, 1])
@@ -153,7 +133,7 @@ else:
             st.markdown(
                 f"""
                 **#{row['S.No.']}** | `{row['Timestamp']}` | 🚛 **{row['Vehicle Tag']}**  
-                **Code**: {row['DTC Code']} | **Severity**: `{row['Severity']}`  
+                **Code**: `{row['DTC Code']}` | **Severity**: `{row['Severity']}`  
                 _{row['Description']}_
                 """
             )
@@ -163,9 +143,9 @@ else:
                     st.session_state.seen_alerts.remove(log_id)
                 else:
                     st.session_state.seen_alerts.add(log_id)
-                st.experimental_rerun()
+                st.rerun()
 
-    # Save to CSV
+    # CSV Storage
     clean_data = df.drop(columns=["Seen"])
     if not os.path.exists(HISTORY_CSV):
         with open(HISTORY_CSV, "w", newline="", encoding="utf-8") as f:
@@ -177,6 +157,6 @@ else:
             writer = csv.DictWriter(f, fieldnames=clean_data.columns)
             writer.writerows(clean_data.to_dict(orient="records"))
 
-# === Timestamp Footer ===
+# === Footer ===
 ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
 st.markdown(f"✅ Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
