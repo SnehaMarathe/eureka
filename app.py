@@ -193,7 +193,7 @@ ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
 st.markdown(f"✅ Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
 
 # Inject auto-refresh meta tag if enabled
-if auto:
-    st.markdown("""
-        <meta http-equiv="refresh" content="10">
-    """, unsafe_allow_html=True)
+#if auto:
+#    st.markdown("""
+#        <meta http-equiv="refresh" content="10">
+#    """, unsafe_allow_html=True)
