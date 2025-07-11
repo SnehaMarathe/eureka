@@ -190,3 +190,12 @@ else:
             writer.writerows(data)
 
     st.success("✅ Data saved to alert_history.csv")
+
+# Auto-refresh with meta tag
+if auto:
+    st.markdown(
+        """
+        <meta http-equiv="refresh" content="10">
+        """,
+        unsafe_allow_html=True
+    )
