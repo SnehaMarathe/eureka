@@ -22,16 +22,16 @@ HEADERS = {
     "Accept": "application/json"
 }
 ALERT_TEMPLATE = "https://apis.intangles.com/alertlog/logsV2/{start_ts}/{end_ts}"
-REFRESH_INTERVAL = 10
 
-# === Page Setup ===
+# === Streamlit Config ===
 st.set_page_config(page_title="Blue Energy Alerts", layout="wide")
 st.title("🔔 Blue Energy Motors Alert Dashboard")
 
+# === Session State Setup ===
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = time.time()
 if "seen_alerts" not in st.session_state:
-    st.session_state.seen_alerts = {}
+    st.session_state.seen_alerts = set()
 
 # === Serial Tracking ===
 def normalize_key(timestamp, vehicle_tag, code):
@@ -49,15 +49,16 @@ def save_serial_map(map_data):
 
 serial_map = load_serial_map()
 
-# === API Functions ===
+# === Utility Functions ===
 def format_ist(ts_ms):
     dt_utc = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
     dt_ist = dt_utc + timedelta(hours=5, minutes=30)
     return dt_ist.strftime("%Y-%m-%d %H:%M:%S")
 
+# === API Fetch ===
 def get_alert_logs():
     end_ts = int(time.time() * 1000)
-    start_ts = end_ts - 2 * 60 * 60 * 1000
+    start_ts = end_ts - 2 * 60 * 60 * 1000  # last 2 hours
     params = {
         "pnum": "1",
         "psize": "50",
@@ -96,6 +97,8 @@ def process_alerts(alerts):
         dtc_info = log.get("dtc_info", [{}])[0]
         severity = {1: "LOW", 2: "HIGH", 3: "CRITICAL"}.get(log.get("dtcs", {}).get("severity_level", 1), "LOW")
 
+        seen = "✅" if log_id in st.session_state.seen_alerts else "❌"
+
         row = {
             "S.No.": serial_no,
             "Log ID": log_id,
@@ -104,63 +107,76 @@ def process_alerts(alerts):
             "DTC Code": code,
             "Severity": severity,
             "Description": dtc_info.get("description", ""),
-            "Seen": st.session_state.seen_alerts.get(log_id, False)
+            "Seen": seen
         }
         output.append(row)
 
     save_serial_map(serial_map)
     return output
 
-# === Refresh Control UI ===
+# === Sidebar: Auto-Refresh & Manual Refresh ===
+refresh_interval = 10
 auto = st.sidebar.toggle("🔄 Auto-Refresh", value=True)
 countdown = st.sidebar.empty()
 
-placeholder = st.empty()
-
-# Manual Refresh
 if st.sidebar.button("🔁 Manual Refresh"):
     st.session_state.last_refresh = time.time()
-    st.rerun()
+    st.experimental_rerun()
 
-# Auto-refresh logic
-while auto:
+# === Countdown and Trigger Refresh ===
+if auto:
     elapsed = time.time() - st.session_state.last_refresh
-    remaining = REFRESH_INTERVAL - int(elapsed)
+    remaining = refresh_interval - int(elapsed)
 
     if remaining <= 0:
         st.session_state.last_refresh = time.time()
-        st.rerun()
+        st.experimental_rerun()
     else:
         countdown.info(f"Refreshing in {remaining}s")
-        time.sleep(1)  # Delay for countdown
-        st.experimental_rerun()  # Rerun only to update countdown
+        time.sleep(1)
+        st.experimental_rerun()
 
-    alerts = get_alert_logs()
-    data = process_alerts(alerts)
+# === Fetch & Display Data ===
+alerts = get_alert_logs()
+data = process_alerts(alerts)
 
-    if not data:
-        st.info("No alerts found.")
+if not data:
+    st.info("No alerts found.")
+else:
+    df = pd.DataFrame(data).sort_values("S.No.", ascending=False)
+
+    # Toggle "Seen" status
+    for i, row in df.iterrows():
+        log_id = row["Log ID"]
+        col1, col2 = st.columns([8, 1])
+        with col1:
+            st.markdown(
+                f"""
+                **#{row['S.No.']}** | `{row['Timestamp']}` | 🚛 **{row['Vehicle Tag']}**  
+                **Code**: {row['DTC Code']} | **Severity**: `{row['Severity']}`  
+                _{row['Description']}_
+                """
+            )
+        with col2:
+            if st.button("✅" if log_id in st.session_state.seen_alerts else "❌", key=log_id):
+                if log_id in st.session_state.seen_alerts:
+                    st.session_state.seen_alerts.remove(log_id)
+                else:
+                    st.session_state.seen_alerts.add(log_id)
+                st.experimental_rerun()
+
+    # Save to CSV
+    clean_data = df.drop(columns=["Seen"])
+    if not os.path.exists(HISTORY_CSV):
+        with open(HISTORY_CSV, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=clean_data.columns)
+            writer.writeheader()
+            writer.writerows(clean_data.to_dict(orient="records"))
     else:
-        df = pd.DataFrame(data).sort_values("S.No.", ascending=False)
-        edited_df = st.data_editor(df, use_container_width=True, num_rows="dynamic", key="editor")
+        with open(HISTORY_CSV, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=clean_data.columns)
+            writer.writerows(clean_data.to_dict(orient="records"))
 
-        # Update session state for Seen
-        for _, row in edited_df.iterrows():
-            st.session_state.seen_alerts[row["Log ID"]] = row["Seen"]
-
-        # Save to CSV
-        if not os.path.exists(HISTORY_CSV):
-            with open(HISTORY_CSV, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=df.columns)
-                writer.writeheader()
-                writer.writerows(df.to_dict(orient="records"))
-        else:
-            with open(HISTORY_CSV, "a", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=df.columns)
-                writer.writerows(df.to_dict(orient="records"))
-
-        st.success("✅ Data saved to alert_history.csv")
-
-    # IST time
-    ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
-    st.markdown(f"✅ Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
+# === Timestamp Footer ===
+ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
+st.markdown(f"✅ Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
