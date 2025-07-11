@@ -115,22 +115,25 @@ def process_alerts(alerts):
 auto = st.sidebar.toggle("🔄 Auto-Refresh", value=True)
 countdown = st.sidebar.empty()
 
-elapsed = time.time() - st.session_state.last_refresh
-remaining = REFRESH_INTERVAL - int(elapsed)
+placeholder = st.empty()
 
+# Manual Refresh
 if st.sidebar.button("🔁 Manual Refresh"):
     st.session_state.last_refresh = time.time()
     st.rerun()
 
-placeholder = st.empty()
+# Auto-refresh logic
+while auto:
+    elapsed = time.time() - st.session_state.last_refresh
+    remaining = REFRESH_INTERVAL - int(elapsed)
 
-# === Main Display Refresh Loop ===
-with placeholder.container():
-    if auto and remaining <= 0:
+    if remaining <= 0:
         st.session_state.last_refresh = time.time()
         st.rerun()
-    elif auto:
+    else:
         countdown.info(f"Refreshing in {remaining}s")
+        time.sleep(1)  # Delay for countdown
+        st.experimental_rerun()  # Rerun only to update countdown
 
     alerts = get_alert_logs()
     data = process_alerts(alerts)
