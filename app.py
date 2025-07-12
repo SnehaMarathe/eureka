@@ -58,7 +58,7 @@ serial_map = load_serial_map()
 # === Fetch Alerts ===
 def format_ist(ts_ms):
     dt_utc = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
-    dt_ist = dt_utc + timedelta(hours=5, 30)
+    dt_ist = dt_utc + timedelta(hours=5, minutes=30)
     return dt_ist.strftime("%Y-%m-%d %H:%M:%S")
 
 def get_alert_logs():
@@ -152,7 +152,6 @@ else:
         return [color] * len(row)
 
     styled_df = df.style.apply(highlight_severity, axis=1)
-
     st.dataframe(styled_df, use_container_width=True, height=600)
 
 # === IST Timestamp ===
