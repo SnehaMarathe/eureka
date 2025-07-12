@@ -50,13 +50,49 @@ def save_serial_map(map_data):
 
 serial_map = load_serial_map()
 
-# === Helper: Format Timestamps ===
+# === Helper Functions ===
 def format_ist(ts_ms):
     dt_utc = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
     dt_ist = dt_utc + timedelta(hours=5, minutes=30)
     return dt_ist.strftime("%Y-%m-%d %H:%M:%S")
 
-# === Fetch Alert Logs ===
+def calculate_active_time(status_history, fallback_timestamp=None):
+    now_ms = int(time.time() * 1000)
+
+    if not status_history:
+        if fallback_timestamp:
+            active_duration = now_ms - fallback_timestamp
+            return format_ist(fallback_timestamp), "-", str(timedelta(milliseconds=active_duration)).split('.')[0]
+        else:
+            return "-", "-", "-"
+
+    status_history.sort(key=lambda x: x['timestamp'])
+    total_active = timedelta(0)
+    active_start = None
+    last_active = None
+    last_removed = None
+
+    for entry in status_history:
+        status = entry.get("status", "").lower()
+        ts = entry.get("timestamp")
+        if status == "active":
+            active_start = ts
+            last_active = ts
+        elif status == "removed":
+            last_removed = ts
+            if active_start:
+                total_active += timedelta(milliseconds=ts - active_start)
+                active_start = None
+
+    if active_start:
+        total_active += timedelta(milliseconds=now_ms - active_start)
+
+    def ts_to_str(ts):
+        return format_ist(ts) if ts else "-"
+
+    return ts_to_str(last_active), ts_to_str(last_removed), str(total_active).split('.')[0]
+
+# === Alert Fetching ===
 def get_alert_logs():
     end_ts = int(time.time() * 1000)
     start_ts = end_ts - 2 * 60 * 60 * 1000  # past 2 hours
@@ -76,42 +112,6 @@ def get_alert_logs():
     response = requests.get(url, headers=HEADERS, params=params)
     return response.json().get("logs", [])
 
-# === Process Active/Removed Times ===
-def calculate_active_time(status_history):
-    if not status_history:
-        return "-", "-", "-"
-
-    status_history.sort(key=lambda x: x['timestamp'])
-    total_active = timedelta(0)
-    active_start = None
-    last_active = None
-    last_removed = None
-
-    for entry in status_history:
-        status = entry.get("status", "").lower()
-        ts = entry.get("timestamp")
-        if status == "active":
-            active_start = ts
-            last_active = ts
-        elif status == "removed":
-            last_removed = ts
-            if active_start:
-                duration = ts - active_start
-                total_active += timedelta(milliseconds=duration)
-                active_start = None
-
-    if active_start:  # still active
-        now_ms = int(time.time() * 1000)
-        total_active += timedelta(milliseconds=(now_ms - active_start))
-
-    def ts_to_str(ts):
-        if not ts:
-            return "-"
-        return format_ist(ts)
-
-    return ts_to_str(last_active), ts_to_str(last_removed), str(total_active).split('.')[0]
-
-# === Process Alerts ===
 def process_alerts(alerts):
     output = []
     current_serials = set(serial_map.values())
@@ -128,7 +128,7 @@ def process_alerts(alerts):
         severity = {1: "LOW", 2: "HIGH", 3: "CRITICAL"}.get(severity_value, "LOW")
 
         if severity not in ["HIGH", "CRITICAL"]:
-            continue
+            continue  # filter only HIGH & CRITICAL
 
         serial_no = serial_map.get(unique_key)
         if serial_no is None:
@@ -138,7 +138,7 @@ def process_alerts(alerts):
 
         dtc_info = log.get("dtc_info", [{}])[0]
         status_list = log.get("status", [])
-        last_active, last_removed, active_duration = calculate_active_time(status_list)
+        last_active, last_removed, active_duration = calculate_active_time(status_list, timestamp)
 
         row = {
             "S.No.": serial_no,
@@ -164,10 +164,10 @@ data = process_alerts(alerts)
 # === Countdown Timer ===
 elapsed = int(time.time() - st.session_state.last_refresh)
 countdown = max(0, REFRESH_INTERVAL - elapsed)
-st.sidebar.markdown(f"⏳ Refreshing in **{countdown}s**")
+st.sidebar.markdown(f"\u23F3 Refreshing in **{countdown}s**")
 
 # === Manual Refresh ===
-if st.sidebar.button("🔁 Manual Refresh"):
+if st.sidebar.button("\U0001F501 Manual Refresh"):
     st.session_state.last_refresh = time.time()
     st.experimental_rerun()
 
@@ -197,4 +197,4 @@ else:
 
 # === Show Last Updated ===
 ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
-st.markdown(f"✅ Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
+st.markdown(f"\u2705 Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
