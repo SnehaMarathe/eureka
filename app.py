@@ -29,7 +29,10 @@ st.set_page_config(page_title="Alerts", layout="wide")
 st.title("🔔 Alert Dashboard - Only Critical and High")
 
 REFRESH_INTERVAL = 10  # seconds
-st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="datarefresh")
+# Automatically refresh and track the refresh trigger
+autorefresh_triggered = st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="datarefresh")
+if autorefresh_triggered and time.time() - st.session_state.last_refresh >= REFRESH_INTERVAL:
+    st.session_state.last_refresh = time.time()
 
 # === State ===
 if "seen_alerts" not in st.session_state:
