@@ -3,7 +3,6 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 import requests
 import json
-import csv
 import os
 import pandas as pd
 from datetime import datetime, timedelta, timezone
@@ -29,13 +28,9 @@ st.set_page_config(page_title="Alerts", layout="wide")
 st.title("🔔 Alert Dashboard - Only Critical and High")
 
 REFRESH_INTERVAL = 10  # seconds
-
-# Auto-refresh every REFRESH_INTERVAL seconds
 st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="datarefresh")
 
-# === Session State Setup ===
-if "seen_alerts" not in st.session_state:
-    st.session_state.seen_alerts = set()
+# === Session State Initialization ===
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = time.time()
 
@@ -120,7 +115,7 @@ def process_alerts(alerts):
     save_serial_map(serial_map)
     return output
 
-# === Fetch Data ===
+# === Fetch & Display Alerts ===
 alerts = get_alert_logs()
 data = process_alerts(alerts)
 
@@ -134,36 +129,28 @@ if st.sidebar.button("🔁 Manual Refresh"):
     st.session_state.last_refresh = time.time()
     st.experimental_rerun()
 
-# === Display Alerts ===
+# === Display Cards ===
 if not data:
     st.info("No HIGH or CRITICAL alerts found.")
 else:
     for alert in sorted(data, key=lambda x: x["Timestamp"], reverse=True):
         severity = alert["Severity"]
         color = "#ffcccc" if severity == "CRITICAL" else "#ffe5b4"
-        log_id = alert["Log ID"]
-        seen = log_id in st.session_state.seen_alerts
 
-        col1, col2 = st.columns([0.9, 0.1])
-        with col1:
-            st.markdown(
-                f"""
-                <div style="background-color:{color}; padding:10px; border-radius:8px; margin-bottom:10px;">
-                    <strong>[{severity}]</strong><br>
-                    <strong>Timestamp:</strong> {alert['Timestamp']}<br>
-                    <strong>Vehicle:</strong> {alert['Vehicle Tag']}<br>
-                    <strong>DTC Code:</strong> {alert['DTC Code']}<br>
-                    <strong>Description:</strong> {alert['Description']}<br>
-                    <strong>Seen:</strong> {"✅" if seen else "❌"}
-                </div>
-                """,
-                unsafe_allow_html=True
-            )
-        with col2:
-            if not seen and st.button("Mark Seen", key=f"seen_{log_id}"):
-                st.session_state.seen_alerts.add(log_id)
-                st.experimental_rerun()
+        st.markdown(
+            f"""
+            <div style="background-color:{color}; padding:10px; border-radius:8px; margin-bottom:10px;">
+                <strong>[{severity}]</strong><br>
+                <strong>Timestamp:</strong> {alert['Timestamp']}<br>
+                <strong>Vehicle:</strong> {alert['Vehicle Tag']}<br>
+                <strong>DTC Code:</strong> {alert['DTC Code']}<br>
+                <strong>Description:</strong> {alert['Description']}<br>
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
 
 # === Show Last Updated ===
 ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
 st.markdown(f"✅ Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
+
