@@ -3,8 +3,8 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 import requests
 import json
-import os
 import csv
+import os
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 import time
@@ -29,18 +29,17 @@ st.set_page_config(page_title="Alerts", layout="wide")
 st.title("🔔 Alert Dashboard - Only Critical and High")
 
 REFRESH_INTERVAL = 10  # seconds
-# Automatically refresh and track the refresh trigger
-autorefresh_triggered = st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="datarefresh")
-if autorefresh_triggered and time.time() - st.session_state.last_refresh >= REFRESH_INTERVAL:
-    st.session_state.last_refresh = time.time()
 
-# === State ===
+# Auto-refresh every REFRESH_INTERVAL seconds
+st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="datarefresh")
+
+# === Session State Setup ===
 if "seen_alerts" not in st.session_state:
     st.session_state.seen_alerts = set()
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = time.time()
 
-# === Serial Mapping ===
+# === Serial Tracking ===
 def normalize_key(timestamp, vehicle_tag, code):
     return f"{int(timestamp)}_{vehicle_tag.strip().upper()}_{code.strip().upper()}"
 
@@ -56,7 +55,7 @@ def save_serial_map(map_data):
 
 serial_map = load_serial_map()
 
-# === Utils ===
+# === Alert Fetching ===
 def format_ist(ts_ms):
     dt_utc = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
     dt_ist = dt_utc + timedelta(hours=5, minutes=30)
@@ -64,7 +63,7 @@ def format_ist(ts_ms):
 
 def get_alert_logs():
     end_ts = int(time.time() * 1000)
-    start_ts = end_ts - 2 * 60 * 60 * 1000
+    start_ts = end_ts - 2 * 60 * 60 * 1000  # past 2 hours
     params = {
         "pnum": "1",
         "psize": "50",
@@ -97,7 +96,7 @@ def process_alerts(alerts):
         severity = {1: "LOW", 2: "HIGH", 3: "CRITICAL"}.get(severity_value, "LOW")
 
         if severity not in ["HIGH", "CRITICAL"]:
-            continue
+            continue  # filter only HIGH & CRITICAL
 
         serial_no = serial_map.get(unique_key)
         if serial_no is None:
@@ -114,8 +113,7 @@ def process_alerts(alerts):
             "Vehicle Tag": vehicle_tag,
             "DTC Code": code,
             "Severity": severity,
-            "Description": dtc_info.get("description", ""),
-            "Seen": "✅" if log_id in st.session_state.seen_alerts else "❌"
+            "Description": dtc_info.get("description", "")
         }
         output.append(row)
 
@@ -131,31 +129,41 @@ elapsed = int(time.time() - st.session_state.last_refresh)
 countdown = max(0, REFRESH_INTERVAL - elapsed)
 st.sidebar.markdown(f"⏳ Refreshing in **{countdown}s**")
 
+# === Manual Refresh ===
 if st.sidebar.button("🔁 Manual Refresh"):
     st.session_state.last_refresh = time.time()
     st.experimental_rerun()
 
-# === Display Data as Alert Cards ===
+# === Display Alerts ===
 if not data:
     st.info("No HIGH or CRITICAL alerts found.")
 else:
-    for row in sorted(data, key=lambda x: x["S.No."], reverse=True):
-        bg_color = "#ffe5b4" if row["Severity"] == "HIGH" else "#ffcccc"  # orange / red
-        with st.container():
+    for alert in sorted(data, key=lambda x: x["Timestamp"], reverse=True):
+        severity = alert["Severity"]
+        color = "#ffcccc" if severity == "CRITICAL" else "#ffe5b4"
+        log_id = alert["Log ID"]
+        seen = log_id in st.session_state.seen_alerts
+
+        col1, col2 = st.columns([0.9, 0.1])
+        with col1:
             st.markdown(
                 f"""
-                <div style="background-color:{bg_color}; padding:15px; border-radius:10px; margin-bottom:10px;">
-                    <strong>🚨 Alert #{row['S.No.']} [{row['Severity']}]</strong><br>
-                    <b>Vehicle:</b> {row['Vehicle Tag']}<br>
-                    <b>Timestamp:</b> {row['Timestamp']}<br>
-                    <b>DTC Code:</b> {row['DTC Code']}<br>
-                    <b>Description:</b> {row['Description']}<br>
-                    <b>Seen:</b> {row['Seen']}
+                <div style="background-color:{color}; padding:10px; border-radius:8px; margin-bottom:10px;">
+                    <strong>[{severity}]</strong><br>
+                    <strong>Timestamp:</strong> {alert['Timestamp']}<br>
+                    <strong>Vehicle:</strong> {alert['Vehicle Tag']}<br>
+                    <strong>DTC Code:</strong> {alert['DTC Code']}<br>
+                    <strong>Description:</strong> {alert['Description']}<br>
+                    <strong>Seen:</strong> {"✅" if seen else "❌"}
                 </div>
                 """,
                 unsafe_allow_html=True
             )
+        with col2:
+            if not seen and st.button("Mark Seen", key=f"seen_{log_id}"):
+                st.session_state.seen_alerts.add(log_id)
+                st.experimental_rerun()
 
-# === IST Timestamp ===
+# === Show Last Updated ===
 ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
 st.markdown(f"✅ Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
