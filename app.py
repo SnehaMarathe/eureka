@@ -1,12 +1,13 @@
 # app.py
 import streamlit as st
+from streamlit_autorefresh import st_autorefresh
 import requests
 import json
 import csv
 import os
 import pandas as pd
 from datetime import datetime, timedelta, timezone
-from streamlit_autorefresh import st_autorefresh
+import time
 
 # === File Paths ===
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -23,21 +24,22 @@ HEADERS = {
 }
 ALERT_TEMPLATE = "https://apis.intangles.com/alertlog/logsV2/{start_ts}/{end_ts}"
 
-# === Streamlit Config ===
+# === Streamlit Setup ===
 st.set_page_config(page_title="Alerts", layout="wide")
-st.title("🔔 Alert Dashboard")
+st.title("🔔 Alert Dashboard - Only Critical and High")
 
-# === Refresh Control ===
-refresh_interval = 10  # in seconds
-auto = st.sidebar.toggle("🔄 Auto-Refresh", value=True)
+REFRESH_INTERVAL = 10  # seconds
 
-if auto:
-    st_autorefresh(interval=refresh_interval * 1000, key="auto_refresh")
+# Auto-refresh every REFRESH_INTERVAL seconds
+st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="datarefresh")
 
+# === State Initialization ===
 if "seen_alerts" not in st.session_state:
     st.session_state.seen_alerts = set()
+if "last_refresh" not in st.session_state:
+    st.session_state.last_refresh = time.time()
 
-# === Serial Tracking ===
+# === Serial Map ===
 def normalize_key(timestamp, vehicle_tag, code):
     return f"{int(timestamp)}_{vehicle_tag.strip().upper()}_{code.strip().upper()}"
 
@@ -53,15 +55,15 @@ def save_serial_map(map_data):
 
 serial_map = load_serial_map()
 
-# === Utility ===
+# === Fetch Alerts ===
 def format_ist(ts_ms):
     dt_utc = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
-    dt_ist = dt_utc + timedelta(hours=5, minutes=30)
+    dt_ist = dt_utc + timedelta(hours=5, 30)
     return dt_ist.strftime("%Y-%m-%d %H:%M:%S")
 
 def get_alert_logs():
-    end_ts = int(datetime.utcnow().timestamp() * 1000)
-    start_ts = end_ts - 2 * 60 * 60 * 1000
+    end_ts = int(time.time() * 1000)
+    start_ts = end_ts - 2 * 60 * 60 * 1000  # past 2 hours
     params = {
         "pnum": "1",
         "psize": "50",
@@ -90,6 +92,13 @@ def process_alerts(alerts):
         vehicle_tag = log.get("vehicle_tag", log.get("vehicle_plate", ""))
         unique_key = normalize_key(timestamp, vehicle_tag, code)
 
+        severity_value = log.get("dtcs", {}).get("severity_level", 1)
+        severity = {1: "LOW", 2: "HIGH", 3: "CRITICAL"}.get(severity_value, "LOW")
+
+        # 🔴 Only keep HIGH and CRITICAL alerts
+        if severity not in ["HIGH", "CRITICAL"]:
+            continue
+
         serial_no = serial_map.get(unique_key)
         if serial_no is None:
             serial_no = new_serial
@@ -97,9 +106,6 @@ def process_alerts(alerts):
             new_serial += 1
 
         dtc_info = log.get("dtc_info", [{}])[0]
-        severity = {1: "LOW", 2: "HIGH", 3: "CRITICAL"}.get(log.get("dtcs", {}).get("severity_level", 1), "LOW")
-
-        seen = "✅" if log_id in st.session_state.seen_alerts else "❌"
 
         row = {
             "S.No.": serial_no,
@@ -109,54 +115,46 @@ def process_alerts(alerts):
             "DTC Code": code,
             "Severity": severity,
             "Description": dtc_info.get("description", ""),
-            "Seen": seen
+            "Seen": "✅" if log_id in st.session_state.seen_alerts else "❌"
         }
         output.append(row)
 
     save_serial_map(serial_map)
     return output
 
-# === Fetch and Display ===
+# === Fetch Data ===
 alerts = get_alert_logs()
 data = process_alerts(alerts)
 
+# === Countdown Timer ===
+elapsed = int(time.time() - st.session_state.last_refresh)
+countdown = max(0, REFRESH_INTERVAL - elapsed)
+st.sidebar.markdown(f"⏳ Refreshing in **{countdown}s**")
+
+# === Manual Refresh ===
+if st.sidebar.button("🔁 Manual Refresh"):
+    st.session_state.last_refresh = time.time()
+    st.experimental_rerun()
+
+# === Display Data ===
 if not data:
-    st.info("No alerts found.")
+    st.info("No HIGH or CRITICAL alerts found.")
 else:
     df = pd.DataFrame(data).sort_values("S.No.", ascending=False)
 
-    # Seen Toggle
-    for i, row in df.iterrows():
-        log_id = row["Log ID"]
-        col1, col2 = st.columns([8, 1])
-        with col1:
-            st.markdown(
-                f"""
-                **#{row['S.No.']}** | `{row['Timestamp']}` | 🚛 **{row['Vehicle Tag']}**  
-                **Code**: `{row['DTC Code']}` | **Severity**: `{row['Severity']}`  
-                _{row['Description']}_
-                """
-            )
-        with col2:
-            if st.button("✅" if log_id in st.session_state.seen_alerts else "❌", key=log_id):
-                if log_id in st.session_state.seen_alerts:
-                    st.session_state.seen_alerts.remove(log_id)
-                else:
-                    st.session_state.seen_alerts.add(log_id)
-                st.rerun()
+    # Define a row-wise style function
+    def highlight_severity(row):
+        color = ""
+        if row["Severity"] == "CRITICAL":
+            color = "background-color: #ffcccc;"  # Light red
+        elif row["Severity"] == "HIGH":
+            color = "background-color: #ffe5b4;"  # Light orange
+        return [color] * len(row)
 
-    # CSV Storage
-    clean_data = df.drop(columns=["Seen"])
-    if not os.path.exists(HISTORY_CSV):
-        with open(HISTORY_CSV, "w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=clean_data.columns)
-            writer.writeheader()
-            writer.writerows(clean_data.to_dict(orient="records"))
-    else:
-        with open(HISTORY_CSV, "a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=clean_data.columns)
-            writer.writerows(clean_data.to_dict(orient="records"))
+    styled_df = df.style.apply(highlight_severity, axis=1)
 
-# === Footer ===
+    st.dataframe(styled_df, use_container_width=True, height=600)
+
+# === IST Timestamp ===
 ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
 st.markdown(f"✅ Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
