@@ -3,8 +3,8 @@ import streamlit as st
 from streamlit_autorefresh import st_autorefresh
 import requests
 import json
-import csv
 import os
+import csv
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 import time
@@ -29,17 +29,15 @@ st.set_page_config(page_title="Alerts", layout="wide")
 st.title("🔔 Alert Dashboard - Only Critical and High")
 
 REFRESH_INTERVAL = 10  # seconds
-
-# Auto-refresh every REFRESH_INTERVAL seconds
 st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="datarefresh")
 
-# === State Initialization ===
+# === State ===
 if "seen_alerts" not in st.session_state:
     st.session_state.seen_alerts = set()
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = time.time()
 
-# === Serial Map ===
+# === Serial Mapping ===
 def normalize_key(timestamp, vehicle_tag, code):
     return f"{int(timestamp)}_{vehicle_tag.strip().upper()}_{code.strip().upper()}"
 
@@ -55,7 +53,7 @@ def save_serial_map(map_data):
 
 serial_map = load_serial_map()
 
-# === Fetch Alerts ===
+# === Utils ===
 def format_ist(ts_ms):
     dt_utc = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
     dt_ist = dt_utc + timedelta(hours=5, minutes=30)
@@ -63,7 +61,7 @@ def format_ist(ts_ms):
 
 def get_alert_logs():
     end_ts = int(time.time() * 1000)
-    start_ts = end_ts - 2 * 60 * 60 * 1000  # past 2 hours
+    start_ts = end_ts - 2 * 60 * 60 * 1000
     params = {
         "pnum": "1",
         "psize": "50",
@@ -95,7 +93,6 @@ def process_alerts(alerts):
         severity_value = log.get("dtcs", {}).get("severity_level", 1)
         severity = {1: "LOW", 2: "HIGH", 3: "CRITICAL"}.get(severity_value, "LOW")
 
-        # 🔴 Only keep HIGH and CRITICAL alerts
         if severity not in ["HIGH", "CRITICAL"]:
             continue
 
@@ -131,28 +128,30 @@ elapsed = int(time.time() - st.session_state.last_refresh)
 countdown = max(0, REFRESH_INTERVAL - elapsed)
 st.sidebar.markdown(f"⏳ Refreshing in **{countdown}s**")
 
-# === Manual Refresh ===
 if st.sidebar.button("🔁 Manual Refresh"):
     st.session_state.last_refresh = time.time()
     st.experimental_rerun()
 
-# === Display Data ===
+# === Display Data as Alert Cards ===
 if not data:
     st.info("No HIGH or CRITICAL alerts found.")
 else:
-    df = pd.DataFrame(data).sort_values("S.No.", ascending=False)
-
-    # Define a row-wise style function
-    def highlight_severity(row):
-        color = ""
-        if row["Severity"] == "CRITICAL":
-            color = "background-color: #ffcccc;"  # Light red
-        elif row["Severity"] == "HIGH":
-            color = "background-color: #ffe5b4;"  # Light orange
-        return [color] * len(row)
-
-    styled_df = df.style.apply(highlight_severity, axis=1)
-    st.dataframe(styled_df, use_container_width=True, height=600)
+    for row in sorted(data, key=lambda x: x["S.No."], reverse=True):
+        bg_color = "#ffe5b4" if row["Severity"] == "HIGH" else "#ffcccc"  # orange / red
+        with st.container():
+            st.markdown(
+                f"""
+                <div style="background-color:{bg_color}; padding:15px; border-radius:10px; margin-bottom:10px;">
+                    <strong>🚨 Alert #{row['S.No.']} [{row['Severity']}]</strong><br>
+                    <b>Vehicle:</b> {row['Vehicle Tag']}<br>
+                    <b>Timestamp:</b> {row['Timestamp']}<br>
+                    <b>DTC Code:</b> {row['DTC Code']}<br>
+                    <b>Description:</b> {row['Description']}<br>
+                    <b>Seen:</b> {row['Seen']}
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
 
 # === IST Timestamp ===
 ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
