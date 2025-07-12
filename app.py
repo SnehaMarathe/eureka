@@ -50,12 +50,13 @@ def save_serial_map(map_data):
 
 serial_map = load_serial_map()
 
-# === Alert Fetching ===
+# === Helper: Format Timestamps ===
 def format_ist(ts_ms):
     dt_utc = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
     dt_ist = dt_utc + timedelta(hours=5, minutes=30)
     return dt_ist.strftime("%Y-%m-%d %H:%M:%S")
 
+# === Fetch Alert Logs ===
 def get_alert_logs():
     end_ts = int(time.time() * 1000)
     start_ts = end_ts - 2 * 60 * 60 * 1000  # past 2 hours
@@ -75,6 +76,42 @@ def get_alert_logs():
     response = requests.get(url, headers=HEADERS, params=params)
     return response.json().get("logs", [])
 
+# === Process Active/Removed Times ===
+def calculate_active_time(status_history):
+    if not status_history:
+        return "-", "-", "-"
+
+    status_history.sort(key=lambda x: x['timestamp'])
+    total_active = timedelta(0)
+    active_start = None
+    last_active = None
+    last_removed = None
+
+    for entry in status_history:
+        status = entry.get("status", "").lower()
+        ts = entry.get("timestamp")
+        if status == "active":
+            active_start = ts
+            last_active = ts
+        elif status == "removed":
+            last_removed = ts
+            if active_start:
+                duration = ts - active_start
+                total_active += timedelta(milliseconds=duration)
+                active_start = None
+
+    if active_start:  # still active
+        now_ms = int(time.time() * 1000)
+        total_active += timedelta(milliseconds=(now_ms - active_start))
+
+    def ts_to_str(ts):
+        if not ts:
+            return "-"
+        return format_ist(ts)
+
+    return ts_to_str(last_active), ts_to_str(last_removed), str(total_active).split('.')[0]
+
+# === Process Alerts ===
 def process_alerts(alerts):
     output = []
     current_serials = set(serial_map.values())
@@ -91,7 +128,7 @@ def process_alerts(alerts):
         severity = {1: "LOW", 2: "HIGH", 3: "CRITICAL"}.get(severity_value, "LOW")
 
         if severity not in ["HIGH", "CRITICAL"]:
-            continue  # filter only HIGH & CRITICAL
+            continue
 
         serial_no = serial_map.get(unique_key)
         if serial_no is None:
@@ -100,6 +137,8 @@ def process_alerts(alerts):
             new_serial += 1
 
         dtc_info = log.get("dtc_info", [{}])[0]
+        status_list = log.get("status", [])
+        last_active, last_removed, active_duration = calculate_active_time(status_list)
 
         row = {
             "S.No.": serial_no,
@@ -108,7 +147,10 @@ def process_alerts(alerts):
             "Vehicle Tag": vehicle_tag,
             "DTC Code": code,
             "Severity": severity,
-            "Description": dtc_info.get("description", "")
+            "Description": dtc_info.get("description", ""),
+            "Last Active": last_active,
+            "Last Removed": last_removed,
+            "Active Duration": active_duration
         }
         output.append(row)
 
@@ -145,6 +187,9 @@ else:
                 <strong>Vehicle:</strong> {alert['Vehicle Tag']}<br>
                 <strong>DTC Code:</strong> {alert['DTC Code']}<br>
                 <strong>Description:</strong> {alert['Description']}<br>
+                <strong>Last Active:</strong> {alert['Last Active']}<br>
+                <strong>Last Removed:</strong> {alert['Last Removed']}<br>
+                <strong>Active Duration:</strong> {alert['Active Duration']}<br>
             </div>
             """,
             unsafe_allow_html=True
@@ -153,4 +198,3 @@ else:
 # === Show Last Updated ===
 ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
 st.markdown(f"✅ Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
-
