@@ -100,32 +100,41 @@ def calculate_active_time(status_history, fallback_ts=None):
 # === Process Alerts and Track DTCs ===
 def process_alerts(alerts):
     output = []
-    dtc_codes = set()
-    current_serials = set(serial_map.values())
+
+    # Filter only numeric serial values
+    current_serials = {v for v in serial_map.values() if isinstance(v, int)}
     new_serial = max(current_serials, default=0) + 1
 
+    active_dtc_codes = set()
+
     for log in alerts:
-        ts = log.get("timestamp", 0)
+        timestamp = log.get("timestamp", 0)
+        log_id = log.get("id", "")
         code = log.get("dtcs", {}).get("code", "")
         vehicle_tag = log.get("vehicle_tag", log.get("vehicle_plate", ""))
-        severity_val = log.get("dtcs", {}).get("severity_level", 1)
-        severity = {1: "LOW", 2: "HIGH", 3: "CRITICAL"}.get(severity_val, "LOW")
-        if severity not in ["HIGH", "CRITICAL"]:
-            continue
+        unique_key = normalize_key(timestamp, vehicle_tag, code)
 
-        unique_key = normalize_key(ts, vehicle_tag, code)
-        serial_no = serial_map.get(unique_key, new_serial)
-        if unique_key not in serial_map:
+        severity_value = log.get("dtcs", {}).get("severity_level", 1)
+        severity = {1: "LOW", 2: "HIGH", 3: "CRITICAL"}.get(severity_value, "LOW")
+
+        if severity not in ["HIGH", "CRITICAL"]:
+            continue  # Skip non-important alerts
+
+        # 🛠️ Validate serial_no mapping
+        serial_no = serial_map.get(unique_key)
+        if not isinstance(serial_no, int):
+            serial_no = new_serial
             serial_map[unique_key] = serial_no
             new_serial += 1
 
         dtc_info = log.get("dtc_info", [{}])[0]
         status_list = log.get("status", [])
-        last_active, last_removed, active_duration = calculate_active_time(status_list, ts)
+        last_active, last_removed, active_duration = calculate_active_time(status_list, timestamp)
 
         row = {
             "S.No.": serial_no,
-            "Timestamp": format_ist(ts),
+            "Log ID": log_id,
+            "Timestamp": format_ist(timestamp),
             "Vehicle Tag": vehicle_tag,
             "DTC Code": code,
             "Severity": severity,
@@ -134,11 +143,13 @@ def process_alerts(alerts):
             "Last Removed": last_removed,
             "Active Duration": active_duration
         }
+
         output.append(row)
-        dtc_codes.add(code)
+        active_dtc_codes.add(code)
 
     save_serial_map(serial_map)
-    return output, dtc_codes
+    return output, active_dtc_codes
+
 
 # === DTC History ===
 def fetch_dtc_logs(dtc_code):
