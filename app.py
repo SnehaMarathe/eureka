@@ -41,10 +41,17 @@ def normalize_key(timestamp, vehicle_tag, code):
     return f"{int(timestamp)}_{vehicle_tag.strip().upper()}_{code.strip().upper()}"
 
 def load_serial_map():
-    if os.path.exists(SERIAL_TRACK_FILE):
-        with open(SERIAL_TRACK_FILE, "r") as f:
-            return json.load(f)
+    try:
+        if os.path.exists(SERIAL_TRACK_FILE):
+            with open(SERIAL_TRACK_FILE, "r") as f:
+                data = json.load(f)
+                if isinstance(data, dict):
+                    return data
+    except Exception as e:
+        st.warning(f"⚠️ serial_tracker.json is corrupted or invalid. Resetting file. Error: {e}")
+    # fallback
     return {}
+
 
 def save_serial_map(map_data):
     with open(SERIAL_TRACK_FILE, "w") as f:
