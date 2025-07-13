@@ -225,4 +225,4 @@ for code in sorted(active_dtc_codes):
 
 # === Footer ===
 ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
-st.markdown(f"\u2705 Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
+st.markdown(f"Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
