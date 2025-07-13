@@ -8,31 +8,31 @@ import pandas as pd
 from datetime import datetime, timedelta, timezone
 import time
 
-# === File Paths ===
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-HISTORY_CSV = os.path.join(BASE_DIR, "alert_history.csv")
-SERIAL_TRACK_FILE = os.path.join(BASE_DIR, "serial_tracker.json")
-
 # === Config ===
 USER_TOKEN = "QyXSX360esEHoVmge2VTwstx6oIE6xdXe7aKwWUXfkz18wlhe01byby4rfRnJFne"
 ACCOUNT_ID = "962759605811675136"
+VEHICLE_ID = "1150813660168323072"
 HEADERS = {
     "intangles-user-token": USER_TOKEN,
     "intangles-session-type": "web",
-    "Accept": "application/json"
+    "accept": "application/json"
 }
-ALERT_TEMPLATE = "https://apis.intangles.com/alertlog/logsV2/{start_ts}/{end_ts}"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+SERIAL_TRACK_FILE = os.path.join(BASE_DIR, "serial_tracker.json")
 
-# === Streamlit Setup ===
-st.set_page_config(page_title="Alerts", layout="wide")
-st.title("🔔 Alert Dashboard - Only Critical and High")
+# === Streamlit Config ===
+st.set_page_config(page_title="Unified Alert Dashboard", layout="wide")
+st.title("🚨 Unified Alert & DTC History Dashboard")
 
 REFRESH_INTERVAL = 10  # seconds
-st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="datarefresh")
+st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="refresh")
 
-st.session_state.last_refresh = time.time()
+# === Utility ===
+def format_ist(ts_ms):
+    dt_utc = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
+    dt_ist = dt_utc + timedelta(hours=5, minutes=30)
+    return dt_ist.strftime("%Y-%m-%d %H:%M:%S")
 
-# === Helper Functions ===
 def normalize_key(timestamp, vehicle_tag, code):
     return f"{int(timestamp)}_{vehicle_tag.strip().upper()}_{code.strip().upper()}"
 
@@ -46,49 +46,13 @@ def save_serial_map(map_data):
     with open(SERIAL_TRACK_FILE, "w") as f:
         json.dump(map_data, f, indent=2)
 
-def format_ist(ts_ms):
-    dt_utc = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
-    dt_ist = dt_utc + timedelta(hours=5, minutes=30)
-    return dt_ist.strftime("%Y-%m-%d %H:%M:%S")
+serial_map = load_serial_map()
 
-def calculate_active_time(status_history, fallback_timestamp=None, removed=False, removed_ts=None):
-    now_ms = int(time.time() * 1000)
-    if not status_history:
-        if fallback_timestamp:
-            active_duration = now_ms - fallback_timestamp
-            return format_ist(fallback_timestamp), "-", str(timedelta(milliseconds=active_duration)).split('.')[0]
-        else:
-            return "-", "-", "-"
-
-    status_history.sort(key=lambda x: x['timestamp'])
-    total_active = timedelta(0)
-    active_start = None
-    last_active = None
-    last_removed = None
-
-    for entry in status_history:
-        status = entry.get("status", "").lower()
-        ts = entry.get("timestamp")
-        if status == "active":
-            active_start = ts
-            last_active = ts
-        elif status == "removed":
-            last_removed = ts
-            if active_start:
-                total_active += timedelta(milliseconds=ts - active_start)
-                active_start = None
-
-    if active_start:
-        total_active += timedelta(milliseconds=now_ms - active_start)
-
-    def ts_to_str(ts):
-        return format_ist(ts) if ts else "-"
-
-    return ts_to_str(last_active), ts_to_str(last_removed or removed_ts), str(total_active).split('.')[0]
-
+# === Alert Fetching ===
 def get_alert_logs():
     end_ts = int(time.time() * 1000)
-    start_ts = end_ts - 2 * 60 * 60 * 1000
+    start_ts = end_ts - 30 * 60 * 1000  # last 30 minutes
+    url = f"https://apis.intangles.com/alertlog/logsV2/{start_ts}/{end_ts}"
     params = {
         "pnum": "1",
         "psize": "50",
@@ -101,169 +65,137 @@ def get_alert_logs():
         "accounts_with_access": ACCOUNT_ID,
         "lang": "en"
     }
-    url = ALERT_TEMPLATE.format(start_ts=start_ts, end_ts=end_ts)
     response = requests.get(url, headers=HEADERS, params=params)
     return response.json().get("logs", [])
 
-# === Serial Maps ===
-past_serial_map = load_serial_map()
-serial_map = past_serial_map.copy()
+def calculate_active_time(status_history, fallback_ts=None):
+    now_ms = int(time.time() * 1000)
+    if not status_history:
+        if fallback_ts:
+            duration = now_ms - fallback_ts
+            return format_ist(fallback_ts), "-", str(timedelta(milliseconds=duration)).split('.')[0]
+        return "-", "-", "-"
 
-# === Core Processing Function ===
+    status_history.sort(key=lambda x: x['timestamp'])
+    total_active = timedelta(0)
+    active_start = None
+    last_active = last_removed = None
+
+    for entry in status_history:
+        ts, status = entry.get("timestamp"), entry.get("status", "").lower()
+        if status == "active":
+            active_start = ts
+            last_active = ts
+        elif status == "removed":
+            last_removed = ts
+            if active_start:
+                total_active += timedelta(milliseconds=ts - active_start)
+                active_start = None
+
+    if active_start:
+        total_active += timedelta(milliseconds=now_ms - active_start)
+
+    return format_ist(last_active) if last_active else "-", format_ist(last_removed) if last_removed else "-", str(total_active).split('.')[0]
+
+# === Process Alerts and Track DTCs ===
 def process_alerts(alerts):
     output = []
-    current_keys = set()
-    new_serial = max([v["serial"] for v in past_serial_map.values()] + [0]) + 1
+    dtc_codes = set()
+    current_serials = set(serial_map.values())
+    new_serial = max(current_serials, default=0) + 1
 
     for log in alerts:
-        timestamp = log.get("timestamp", 0)
+        ts = log.get("timestamp", 0)
         code = log.get("dtcs", {}).get("code", "")
         vehicle_tag = log.get("vehicle_tag", log.get("vehicle_plate", ""))
-        unique_key = normalize_key(timestamp, vehicle_tag, code)
-        current_keys.add(unique_key)
-
-        severity_value = log.get("dtcs", {}).get("severity_level", 1)
-        severity = {1: "LOW", 2: "HIGH", 3: "CRITICAL"}.get(severity_value, "LOW")
+        severity_val = log.get("dtcs", {}).get("severity_level", 1)
+        severity = {1: "LOW", 2: "HIGH", 3: "CRITICAL"}.get(severity_val, "LOW")
         if severity not in ["HIGH", "CRITICAL"]:
             continue
 
-        dtc_info = log.get("dtc_info", [{}])[0]
-        status_list = log.get("status", [])
-
-        # Fix for accurate removal detection
-        removal_status = any(s.get("status", "").lower() == "removed" for s in status_list)
-        last_removed_ts = next(
-            (s.get("timestamp") for s in status_list if s.get("status", "").lower() == "removed"),
-            None
-        )
-        last_active, last_removed, active_duration = calculate_active_time(
-            status_list, timestamp, removal_status, last_removed_ts
-        )
-
-        # Debug vehicle trace
-        if vehicle_tag.strip().upper() == "MH 14 LL 1850":
-            st.sidebar.write({
-                "DEBUG VEHICLE": vehicle_tag,
-                "code": code,
-                "removal_status": removal_status,
-                "last_active": last_active,
-                "last_removed": last_removed,
-                "status_list": status_list
-            })
-
-        if unique_key in past_serial_map:
-            serial_no = past_serial_map[unique_key]["serial"]
-        else:
-            serial_no = new_serial
+        unique_key = normalize_key(ts, vehicle_tag, code)
+        serial_no = serial_map.get(unique_key, new_serial)
+        if unique_key not in serial_map:
+            serial_map[unique_key] = serial_no
             new_serial += 1
 
-        serial_map[unique_key] = {
-            "serial": serial_no,
-            "removed": removal_status,
-            "removal_ts": last_removed
-        }
+        dtc_info = log.get("dtc_info", [{}])[0]
+        status_list = log.get("status", [])
+        last_active, last_removed, active_duration = calculate_active_time(status_list, ts)
 
         row = {
             "S.No.": serial_no,
-            "Log ID": log.get("id", "-"),
-            "Timestamp": format_ist(timestamp),
+            "Timestamp": format_ist(ts),
             "Vehicle Tag": vehicle_tag,
             "DTC Code": code,
             "Severity": severity,
             "Description": dtc_info.get("description", ""),
             "Last Active": last_active,
             "Last Removed": last_removed,
-            "Active Duration": active_duration,
-            "Removed": removal_status
+            "Active Duration": active_duration
         }
         output.append(row)
-
-    now = datetime.utcnow() + timedelta(hours=5, minutes=30)
-    for key, info in past_serial_map.items():
-        if key in current_keys or not info.get("removed"):
-            continue
-        try:
-            ts_str = info.get("removal_ts")
-            if ts_str:
-                ts_obj = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
-                if now - ts_obj > timedelta(hours=2):
-                    continue
-        except:
-            continue
-
-        parts = key.split("_")
-        if len(parts) >= 3:
-            timestamp = int(parts[0])
-            vehicle_tag = parts[1]
-            code = parts[2]
-            row = {
-                "S.No.": info["serial"],
-                "Log ID": "-",
-                "Timestamp": format_ist(timestamp),
-                "Vehicle Tag": vehicle_tag,
-                "DTC Code": code,
-                "Severity": "UNKNOWN",
-                "Description": "Previously Removed DTC",
-                "Last Active": format_ist(timestamp),
-                "Last Removed": info.get("removal_ts", "-"),
-                "Active Duration": "-",
-                "Removed": True
-            }
-            output.append(row)
+        dtc_codes.add(code)
 
     save_serial_map(serial_map)
-    return output
+    return output, dtc_codes
 
-# === Fetch & Display ===
+# === DTC History ===
+def fetch_dtc_logs(dtc_code):
+    logs = []
+    page, PAGE_SIZE = 1, 20
+    MAX_PAGES = 5
+    while page <= MAX_PAGES:
+        url = f"https://apis.intangles.com/dtc/{dtc_code}/vehicle/{VEHICLE_ID}/historyV2"
+        params = {
+            "psize": PAGE_SIZE,
+            "pnum": page,
+            "acc_id": ACCOUNT_ID,
+            "lang": "en"
+        }
+        response = requests.get(url, headers=HEADERS, params=params)
+        if response.status_code != 200:
+            break
+        page_logs = response.json().get("dtc_log", [])
+        if not page_logs:
+            break
+        logs.extend(page_logs)
+        if len(page_logs) < PAGE_SIZE:
+            break
+        page += 1
+    return logs
+
+def analyze_logs(logs):
+    logs.sort(key=lambda x: x["timestamp"])
+    history, current = [], None
+    for log in logs:
+        ts, status = log["timestamp"], log.get("status")
+        odo = log.get("vehicle_odo_info", "N/A")
+        if status == "active" and not current:
+            current = {"start": ts, "odo": odo}
+        elif status == "removed" and current:
+            current["end"] = ts
+            history.append(current)
+            current = None
+    if current:
+        current["end"] = None
+        history.append(current)
+    return history
+
+# === Main Display Logic ===
 alerts = get_alert_logs()
-data = process_alerts(alerts)
+data, active_dtc_codes = process_alerts(alerts)
 
-vehicle_tags = sorted({d["Vehicle Tag"] for d in data})
-selected_vehicles = st.sidebar.multiselect("🚗 Filter by Vehicle Tag", vehicle_tags, default=vehicle_tags)
-filtered_data = [d for d in data if d["Vehicle Tag"] in selected_vehicles]
-
-elapsed = int(time.time() - st.session_state.last_refresh)
-countdown = max(0, REFRESH_INTERVAL - elapsed)
-st.sidebar.markdown(f"⏳ Refreshing in **{countdown}s**")
-
-if st.sidebar.button("Manual Refresh"):
-    st.experimental_rerun()
-
-if st.sidebar.button("Hard Reset"):
-    if os.path.exists(SERIAL_TRACK_FILE):
-        os.remove(SERIAL_TRACK_FILE)
-    st.experimental_rerun()
-
-def parse_ts(ts_str):
-    try:
-        return datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
-    except:
-        return datetime.min
-
-now_ist = datetime.utcnow() + timedelta(hours=5, 30)
-sorted_data = sorted(
-    filtered_data,
-    key=lambda x: (
-        -1 if x.get("Removed") and x.get("Last Removed") and now_ist - parse_ts(x["Last Removed"]) <= timedelta(hours=2) else 0,
-        parse_ts(x["Timestamp"])
-    ),
-    reverse=True
-)
-
-if not sorted_data:
-    st.info("No HIGH or CRITICAL alerts match the selected filters.")
+# === Display Alerts ===
+if not data:
+    st.info("No HIGH or CRITICAL alerts in the past 30 minutes.")
 else:
-    for alert in sorted_data:
-        if alert.get("Removed"):
-            continue  # hide removed if not recent
-
-        severity = alert["Severity"]
-        color = "#d4edda" if alert.get("Removed") else ("#ffcccc" if severity == "CRITICAL" else "#ffe5b4")
-
+    for alert in sorted(data, key=lambda x: x["Timestamp"], reverse=True):
+        color = "#ffcccc" if alert["Severity"] == "CRITICAL" else "#ffe5b4"
         st.markdown(
             f"""
             <div style="background-color:{color}; padding:10px; border-radius:8px; margin-bottom:10px;">
-                <strong>[{severity}]</strong><br>
+                <strong>[{alert['Severity']}]</strong><br>
                 <strong>Timestamp:</strong> {alert['Timestamp']}<br>
                 <strong>Vehicle:</strong> {alert['Vehicle Tag']}<br>
                 <strong>DTC Code:</strong> {alert['DTC Code']}<br>
@@ -276,5 +208,21 @@ else:
             unsafe_allow_html=True
         )
 
+# === Display DTC History ===
+st.subheader("🧾 Activation/Removal History (Last 30 mins DTCs)")
+for code in sorted(active_dtc_codes):
+    logs = fetch_dtc_logs(code)
+    history = analyze_logs(logs)
+    st.markdown(f"**DTC Code: {code}**")
+    if not history:
+        st.markdown("*No activation/removal history found.*")
+    else:
+        for i, entry in enumerate(history, 1):
+            start = format_ist(entry["start"])
+            end = format_ist(entry["end"]) if entry["end"] else "❌ Still Active"
+            odo = entry["odo"]
+            st.markdown(f"{i}. **Activated:** {start} | **Odo:** {odo} km | **Cleared:** {end}")
+
+# === Footer ===
 ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
-st.markdown(f"✅ Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
+st.markdown(f"\u2705 Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
