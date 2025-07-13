@@ -25,7 +25,7 @@ ALERT_TEMPLATE = "https://apis.intangles.com/alertlog/logsV2/{start_ts}/{end_ts}
 
 # === Streamlit Setup ===
 st.set_page_config(page_title="Alerts", layout="wide")
-st.title("Alert Dashboard - Only Critical and High - Try2")
+st.title("🔔 Alert Dashboard - Only Critical and High")
 
 REFRESH_INTERVAL = 10  # seconds
 st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="datarefresh")
@@ -108,8 +108,8 @@ def get_alert_logs():
     return response.json().get("logs", [])
 
 # === Serial Maps ===
-serial_map = {}  # start fresh
 past_serial_map = load_serial_map()
+serial_map = past_serial_map.copy()  # preserve all previous data
 
 def process_alerts(alerts):
     output = []
@@ -203,7 +203,7 @@ data = process_alerts(alerts)
 
 elapsed = int(time.time() - st.session_state.last_refresh)
 countdown = max(0, REFRESH_INTERVAL - elapsed)
-st.sidebar.markdown(f"Refreshing in **{countdown}s**")
+st.sidebar.markdown(f"⏳ Refreshing in **{countdown}s**")
 
 if st.sidebar.button("Manual Refresh"):
     st.session_state.last_refresh = time.time()
@@ -238,4 +238,4 @@ else:
         )
 
 ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
-st.markdown(f"Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
+st.markdown(f"✅ Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
