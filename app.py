@@ -203,13 +203,13 @@ data = process_alerts(alerts)
 
 elapsed = int(time.time() - st.session_state.last_refresh)
 countdown = max(0, REFRESH_INTERVAL - elapsed)
-st.sidebar.markdown(f"\u23F3 Refreshing in **{countdown}s**")
+st.sidebar.markdown(f"Refreshing in **{countdown}s**")
 
-if st.sidebar.button("\U0001F501 Manual Refresh"):
+if st.sidebar.button("Manual Refresh"):
     st.session_state.last_refresh = time.time()
     st.experimental_rerun()
 
-if st.sidebar.button("\ud83d\udd04 Hard Reset"):
+if st.sidebar.button("Hard Reset"):
     if os.path.exists(SERIAL_TRACK_FILE):
         os.remove(SERIAL_TRACK_FILE)
     st.experimental_rerun()
@@ -238,4 +238,4 @@ else:
         )
 
 ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
-st.markdown(f"\u2705 Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
+st.markdown(f"Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
