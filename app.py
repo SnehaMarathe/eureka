@@ -219,7 +219,7 @@ def parse_ts(ts_str):
     except:
         return datetime.min
 
-now_ist = datetime.utcnow() + timedelta(hours=5, 30)
+now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
 sorted_data = sorted(
     data,
     key=lambda x: (
