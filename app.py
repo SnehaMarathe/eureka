@@ -25,7 +25,7 @@ ALERT_TEMPLATE = "https://apis.intangles.com/alertlog/logsV2/{start_ts}/{end_ts}
 
 # === Streamlit Setup ===
 st.set_page_config(page_title="Alerts", layout="wide")
-st.title("\ud83d\udd14 Alert Dashboard - Only Critical and High")
+st.title("🔔 Alert Dashboard - Only Critical and High - Try2")
 
 REFRESH_INTERVAL = 10  # seconds
 st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="datarefresh")
