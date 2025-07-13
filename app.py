@@ -30,8 +30,8 @@ st.title("🔔 Alert Dashboard - Only Critical and High")
 REFRESH_INTERVAL = 10  # seconds
 st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="datarefresh")
 
-if "last_refresh" not in st.session_state:
-    st.session_state.last_refresh = time.time()
+# Always update to current time to ensure API time window refreshes
+st.session_state.last_refresh = time.time()
 
 # === Helper Functions ===
 def normalize_key(timestamp, vehicle_tag, code):
@@ -109,7 +109,7 @@ def get_alert_logs():
 
 # === Serial Maps ===
 past_serial_map = load_serial_map()
-serial_map = past_serial_map.copy()  # preserve all previous data
+serial_map = past_serial_map.copy()
 
 def process_alerts(alerts):
     output = []
@@ -206,7 +206,6 @@ countdown = max(0, REFRESH_INTERVAL - elapsed)
 st.sidebar.markdown(f"⏳ Refreshing in **{countdown}s**")
 
 if st.sidebar.button("Manual Refresh"):
-    st.session_state.last_refresh = time.time()
     st.experimental_rerun()
 
 if st.sidebar.button("Hard Reset"):
@@ -214,10 +213,26 @@ if st.sidebar.button("Hard Reset"):
         os.remove(SERIAL_TRACK_FILE)
     st.experimental_rerun()
 
-if not data:
+def parse_ts(ts_str):
+    try:
+        return datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+    except:
+        return datetime.min
+
+now_ist = datetime.utcnow() + timedelta(hours=5, 30)
+sorted_data = sorted(
+    data,
+    key=lambda x: (
+        -1 if x.get("Removed") and x.get("Last Removed") and now_ist - parse_ts(x["Last Removed"]) <= timedelta(hours=2) else 0,
+        parse_ts(x["Timestamp"])
+    ),
+    reverse=True
+)
+
+if not sorted_data:
     st.info("No HIGH or CRITICAL alerts found.")
 else:
-    for alert in sorted(data, key=lambda x: x["Timestamp"], reverse=True):
+    for alert in sorted_data:
         severity = alert["Severity"]
         color = "#d4edda" if alert.get("Removed") else ("#ffcccc" if severity == "CRITICAL" else "#ffe5b4")
 
