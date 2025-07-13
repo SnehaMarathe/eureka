@@ -30,7 +30,6 @@ st.title("🔔 Alert Dashboard - Only Critical and High")
 REFRESH_INTERVAL = 10  # seconds
 st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="datarefresh")
 
-# Always update to current time to ensure API time window refreshes
 st.session_state.last_refresh = time.time()
 
 # === Helper Functions ===
@@ -54,7 +53,6 @@ def format_ist(ts_ms):
 
 def calculate_active_time(status_history, fallback_timestamp=None, removed=False, removed_ts=None):
     now_ms = int(time.time() * 1000)
-
     if not status_history:
         if fallback_timestamp:
             active_duration = now_ms - fallback_timestamp
@@ -111,6 +109,7 @@ def get_alert_logs():
 past_serial_map = load_serial_map()
 serial_map = past_serial_map.copy()
 
+# === Core Processing Function ===
 def process_alerts(alerts):
     output = []
     current_keys = set()
@@ -130,9 +129,27 @@ def process_alerts(alerts):
 
         dtc_info = log.get("dtc_info", [{}])[0]
         status_list = log.get("status", [])
+
+        # Fix for accurate removal detection
         removal_status = any(s.get("status", "").lower() == "removed" for s in status_list)
-        last_removed_ts = next((s.get("timestamp") for s in status_list if s.get("status", "").lower() == "removed"), None)
-        last_active, last_removed, active_duration = calculate_active_time(status_list, timestamp, removal_status, last_removed_ts)
+        last_removed_ts = next(
+            (s.get("timestamp") for s in status_list if s.get("status", "").lower() == "removed"),
+            None
+        )
+        last_active, last_removed, active_duration = calculate_active_time(
+            status_list, timestamp, removal_status, last_removed_ts
+        )
+
+        # Debug vehicle trace
+        if vehicle_tag.strip().upper() == "MH 14 LL 1850":
+            st.sidebar.write({
+                "DEBUG VEHICLE": vehicle_tag,
+                "code": code,
+                "removal_status": removal_status,
+                "last_active": last_active,
+                "last_removed": last_removed,
+                "status_list": status_list
+            })
 
         if unique_key in past_serial_map:
             serial_no = past_serial_map[unique_key]["serial"]
@@ -197,9 +214,13 @@ def process_alerts(alerts):
     save_serial_map(serial_map)
     return output
 
-# === Fetch & Display Alerts ===
+# === Fetch & Display ===
 alerts = get_alert_logs()
 data = process_alerts(alerts)
+
+vehicle_tags = sorted({d["Vehicle Tag"] for d in data})
+selected_vehicles = st.sidebar.multiselect("🚗 Filter by Vehicle Tag", vehicle_tags, default=vehicle_tags)
+filtered_data = [d for d in data if d["Vehicle Tag"] in selected_vehicles]
 
 elapsed = int(time.time() - st.session_state.last_refresh)
 countdown = max(0, REFRESH_INTERVAL - elapsed)
@@ -219,9 +240,9 @@ def parse_ts(ts_str):
     except:
         return datetime.min
 
-now_ist = datetime.utcnow() + timedelta(hours=5, minutes=30)
+now_ist = datetime.utcnow() + timedelta(hours=5, 30)
 sorted_data = sorted(
-    data,
+    filtered_data,
     key=lambda x: (
         -1 if x.get("Removed") and x.get("Last Removed") and now_ist - parse_ts(x["Last Removed"]) <= timedelta(hours=2) else 0,
         parse_ts(x["Timestamp"])
@@ -230,9 +251,12 @@ sorted_data = sorted(
 )
 
 if not sorted_data:
-    st.info("No HIGH or CRITICAL alerts found.")
+    st.info("No HIGH or CRITICAL alerts match the selected filters.")
 else:
     for alert in sorted_data:
+        if alert.get("Removed"):
+            continue  # hide removed if not recent
+
         severity = alert["Severity"]
         color = "#d4edda" if alert.get("Removed") else ("#ffcccc" if severity == "CRITICAL" else "#ffe5b4")
 
