@@ -25,7 +25,7 @@ ALERT_TEMPLATE = "https://apis.intangles.com/alertlog/logsV2/{start_ts}/{end_ts}
 
 # === Streamlit Setup ===
 st.set_page_config(page_title="Alerts", layout="wide")
-st.title("🔔 Alert Dashboard - Only Critical and High - Try1")
+st.title("\ud83d\udd14 Alert Dashboard - Only Critical and High")
 
 REFRESH_INTERVAL = 10  # seconds
 st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="datarefresh")
@@ -33,7 +33,7 @@ st_autorefresh(interval=REFRESH_INTERVAL * 1000, key="datarefresh")
 if "last_refresh" not in st.session_state:
     st.session_state.last_refresh = time.time()
 
-# === Serial Tracking ===
+# === Helper Functions ===
 def normalize_key(timestamp, vehicle_tag, code):
     return f"{int(timestamp)}_{vehicle_tag.strip().upper()}_{code.strip().upper()}"
 
@@ -47,22 +47,18 @@ def save_serial_map(map_data):
     with open(SERIAL_TRACK_FILE, "w") as f:
         json.dump(map_data, f, indent=2)
 
-serial_map = load_serial_map()
-
-# === Helper Functions ===
 def format_ist(ts_ms):
     dt_utc = datetime.fromtimestamp(ts_ms / 1000.0, tz=timezone.utc)
     dt_ist = dt_utc + timedelta(hours=5, minutes=30)
     return dt_ist.strftime("%Y-%m-%d %H:%M:%S")
 
-def calculate_active_time(status_history, fallback_timestamp=None, is_removed=False, removed_ts=None):
+def calculate_active_time(status_history, fallback_timestamp=None, removed=False, removed_ts=None):
     now_ms = int(time.time() * 1000)
 
     if not status_history:
         if fallback_timestamp:
-            end_ts = removed_ts if is_removed and removed_ts else now_ms
-            active_duration = end_ts - fallback_timestamp
-            return format_ist(fallback_timestamp), format_ist(removed_ts) if removed_ts else "-", str(timedelta(milliseconds=active_duration)).split('.')[0]
+            active_duration = now_ms - fallback_timestamp
+            return format_ist(fallback_timestamp), "-", str(timedelta(milliseconds=active_duration)).split('.')[0]
         else:
             return "-", "-", "-"
 
@@ -85,20 +81,16 @@ def calculate_active_time(status_history, fallback_timestamp=None, is_removed=Fa
                 active_start = None
 
     if active_start:
-        if is_removed and removed_ts:
-            total_active += timedelta(milliseconds=removed_ts - active_start)
-        else:
-            total_active += timedelta(milliseconds=now_ms - active_start)
+        total_active += timedelta(milliseconds=now_ms - active_start)
 
     def ts_to_str(ts):
         return format_ist(ts) if ts else "-"
 
-    return ts_to_str(last_active), ts_to_str(last_removed), str(total_active).split('.')[0]
+    return ts_to_str(last_active), ts_to_str(last_removed or removed_ts), str(total_active).split('.')[0]
 
-# === Alert Fetching ===
 def get_alert_logs():
     end_ts = int(time.time() * 1000)
-    start_ts = end_ts - 2 * 60 * 60 * 1000  # past 2 hours
+    start_ts = end_ts - 2 * 60 * 60 * 1000
     params = {
         "pnum": "1",
         "psize": "50",
@@ -115,15 +107,17 @@ def get_alert_logs():
     response = requests.get(url, headers=HEADERS, params=params)
     return response.json().get("logs", [])
 
+# === Serial Maps ===
+serial_map = {}  # start fresh
+past_serial_map = load_serial_map()
+
 def process_alerts(alerts):
     output = []
     current_keys = set()
-    current_serials = [v["serial"] if isinstance(v, dict) else v for v in serial_map.values()]
-    new_serial = max(current_serials, default=0) + 1
+    new_serial = max([v["serial"] for v in past_serial_map.values()] + [0]) + 1
 
     for log in alerts:
         timestamp = log.get("timestamp", 0)
-        log_id = log.get("id", "")
         code = log.get("dtcs", {}).get("code", "")
         vehicle_tag = log.get("vehicle_tag", log.get("vehicle_plate", ""))
         unique_key = normalize_key(timestamp, vehicle_tag, code)
@@ -137,33 +131,24 @@ def process_alerts(alerts):
         dtc_info = log.get("dtc_info", [{}])[0]
         status_list = log.get("status", [])
         removal_status = any(s.get("status", "").lower() == "removed" for s in status_list)
-        last_active, last_removed, active_duration = calculate_active_time(status_list, timestamp, removal_status, next((s.get("timestamp") for s in status_list if s.get("status", "").lower() == "removed"), None))
+        last_removed_ts = next((s.get("timestamp") for s in status_list if s.get("status", "").lower() == "removed"), None)
+        last_active, last_removed, active_duration = calculate_active_time(status_list, timestamp, removal_status, last_removed_ts)
 
-        entry = serial_map.get(unique_key)
-        if entry:
-            serial_no = entry["serial"]
-            removed = entry.get("removed", removal_status)
-            removal_ts = entry.get("removal_ts", last_removed)
+        if unique_key in past_serial_map:
+            serial_no = past_serial_map[unique_key]["serial"]
         else:
             serial_no = new_serial
-            removed = removal_status
-            removal_ts = last_removed if removed else None
-            serial_map[unique_key] = {
-                "serial": serial_no,
-                "removed": removed,
-                "removal_ts": removal_ts
-            }
             new_serial += 1
 
-        # update removal state if changed
-        if unique_key in serial_map:
-            if removal_status:
-                serial_map[unique_key]["removed"] = True
-                serial_map[unique_key]["removal_ts"] = last_removed
+        serial_map[unique_key] = {
+            "serial": serial_no,
+            "removed": removal_status,
+            "removal_ts": last_removed
+        }
 
         row = {
             "S.No.": serial_no,
-            "Log ID": log_id,
+            "Log ID": log.get("id", "-"),
             "Timestamp": format_ist(timestamp),
             "Vehicle Tag": vehicle_tag,
             "DTC Code": code,
@@ -176,16 +161,18 @@ def process_alerts(alerts):
         }
         output.append(row)
 
-    # Add past removed DTCs that are not in current alerts
-    now = int(time.time() * 1000)
-    for key, info in serial_map.items():
-        if key in current_keys:
+    now = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    for key, info in past_serial_map.items():
+        if key in current_keys or not info.get("removed"):
             continue
-        if not isinstance(info, dict) or not info.get("removed"):
+        try:
+            ts_str = info.get("removal_ts")
+            if ts_str:
+                ts_obj = datetime.strptime(ts_str, "%Y-%m-%d %H:%M:%S")
+                if now - ts_obj > timedelta(hours=2):
+                    continue
+        except:
             continue
-        removal_ts = info.get("removal_ts")
-        if removal_ts and now - datetime.strptime(removal_ts, "%Y-%m-%d %H:%M:%S").timestamp() * 1000 > 2 * 60 * 60 * 1000:
-            continue  # skip very old removed ones
 
         parts = key.split("_")
         if len(parts) >= 3:
@@ -214,7 +201,6 @@ def process_alerts(alerts):
 alerts = get_alert_logs()
 data = process_alerts(alerts)
 
-# === Countdown Timer ===
 elapsed = int(time.time() - st.session_state.last_refresh)
 countdown = max(0, REFRESH_INTERVAL - elapsed)
 st.sidebar.markdown(f"\u23F3 Refreshing in **{countdown}s**")
@@ -223,22 +209,22 @@ if st.sidebar.button("\U0001F501 Manual Refresh"):
     st.session_state.last_refresh = time.time()
     st.experimental_rerun()
 
-# === Display Cards ===
+if st.sidebar.button("\ud83d\udd04 Hard Reset"):
+    if os.path.exists(SERIAL_TRACK_FILE):
+        os.remove(SERIAL_TRACK_FILE)
+    st.experimental_rerun()
+
 if not data:
     st.info("No HIGH or CRITICAL alerts found.")
 else:
     for alert in sorted(data, key=lambda x: x["Timestamp"], reverse=True):
-        if alert["Removed"]:
-            color = "#ccffcc"  # green
-        elif alert["Severity"] == "CRITICAL":
-            color = "#ffcccc"  # red
-        else:
-            color = "#ffe5b4"  # orange
+        severity = alert["Severity"]
+        color = "#d4edda" if alert.get("Removed") else ("#ffcccc" if severity == "CRITICAL" else "#ffe5b4")
 
         st.markdown(
             f"""
             <div style="background-color:{color}; padding:10px; border-radius:8px; margin-bottom:10px;">
-                <strong>[{alert['Severity']}]</strong><br>
+                <strong>[{severity}]</strong><br>
                 <strong>Timestamp:</strong> {alert['Timestamp']}<br>
                 <strong>Vehicle:</strong> {alert['Vehicle Tag']}<br>
                 <strong>DTC Code:</strong> {alert['DTC Code']}<br>
@@ -251,6 +237,5 @@ else:
             unsafe_allow_html=True
         )
 
-# === Show Last Updated ===
 ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
 st.markdown(f"\u2705 Last Updated: `{ist_now.strftime('%Y-%m-%d %H:%M:%S')} IST`")
