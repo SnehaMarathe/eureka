@@ -67,19 +67,14 @@ def calculate_active_time(status_history, fallback_timestamp=None):
             return format_ist(fallback_timestamp), "-", str(timedelta(milliseconds=active_duration)).split('.')[0]
         else:
             return "-", "-", "-"
-
     status_history.sort(key=lambda x: x['timestamp'])
     total_active = timedelta(0)
     active_start = None
     last_active = None
     last_removed = None
-
     for entry in status_history:
         status = entry.get("status", "").lower()
-        ts_raw = entry.get("timestamp")
-        # ✅ Patch: Normalize to ms if timestamp appears to be in seconds
-        ts = ts_raw * 1000 if ts_raw and ts_raw < 10**12 else ts_raw
-
+        ts = entry.get("timestamp")
         if status == "active":
             active_start = ts
             last_active = ts
@@ -88,13 +83,10 @@ def calculate_active_time(status_history, fallback_timestamp=None):
             if active_start:
                 total_active += timedelta(milliseconds=ts - active_start)
                 active_start = None
-
     if active_start:
         total_active += timedelta(milliseconds=now_ms - active_start)
-
     def ts_to_str(ts):
         return format_ist(ts) if ts else "-"
-
     return ts_to_str(last_active), ts_to_str(last_removed), str(total_active).split('.')[0]
 
 # === Alert Fetching ===
