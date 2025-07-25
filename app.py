@@ -1,12 +1,11 @@
 import streamlit as st
 import re
-import os
+import io
 import pandas as pd
 from datetime import datetime
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
-from reportlab.lib.units import inch
 
 # --- Page Config ---
 st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
@@ -14,7 +13,7 @@ st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
 # --- Header with Logo beside Title ---
 col1, col2 = st.columns([1, 6])
 with col1:
-    st.image("BEM-Logo.png", width=150)  # Make sure this file is in your app folder
+    st.image("BEM-Logo.png", width=150)
 with col2:
     st.markdown("## 🔧 EurekaCheck - CAN Bus Diagnostic Tool")
     st.write("Upload a `.trc` file from PCAN-View to get a full diagnosis of ECU connectivity and harness health.")
@@ -35,8 +34,9 @@ ecu_map = {
 def extract_source_address(can_id):
     return can_id & 0xFF
 
-def generate_pdf(report_data, vehicle_name, filename):
-    c = canvas.Canvas(filename, pagesize=A4)
+def generate_pdf_buffer(report_data, vehicle_name):
+    buffer = io.BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
     c.setFont("Helvetica-Bold", 14)
     c.drawString(50, height - 50, f"Diagnostic Report - {vehicle_name}")
@@ -57,7 +57,7 @@ def generate_pdf(report_data, vehicle_name, filename):
     c.setFillColor(colors.black)
     y -= 20
     for row in report_data:
-        if y < 50:  # new page if space is low
+        if y < 50:
             c.showPage()
             y = height - 50
         for i, key in enumerate(["ECU", "Source Address", "Status", "Harness Description", "Harness Part No."]):
@@ -66,19 +66,22 @@ def generate_pdf(report_data, vehicle_name, filename):
         y -= 18
 
     c.save()
+    buffer.seek(0)
+    return buffer
 
-# --- Input Vehicle Info ---
+# --- Vehicle Metadata Input ---
 st.markdown("### 🚛 Vehicle Info")
 vehicle_name = st.text_input("Enter Vehicle Name or ID", max_chars=30)
 
-# --- Upload File ---
+# --- File Upload ---
 uploaded_file = st.file_uploader("📁 Upload your `.trc` file", type=["trc"])
 
+# --- Process File ---
 if uploaded_file and vehicle_name.strip():
     content = uploaded_file.read().decode("latin1")
     lines = content.splitlines()
 
-    # Extract seen source addresses
+    # Extract source addresses
     found_sources = set()
     for line in lines:
         match = re.match(r'\s*\d+\)\s+([\d.]+)\s+Rx\s+([0-9A-Fa-f]{6,8})', line)
@@ -101,6 +104,7 @@ if uploaded_file and vehicle_name.strip():
 
     df = pd.DataFrame(report)
 
+    # Show diagnosis results
     st.success("Diagnostics completed successfully!")
     st.subheader("📋 ECU Diagnosis Report")
     st.dataframe(df, use_container_width=True)
@@ -108,24 +112,19 @@ if uploaded_file and vehicle_name.strip():
     with st.expander("🔍 Show only MISSING ECUs"):
         st.table(df[df["Status"].str.contains("MISSING")])
 
-    # Save PDF
-    os.makedirs("reports", exist_ok=True)
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
-    pdf_filename = f"reports/{timestamp}_{vehicle_name.replace(' ', '_')}.pdf"
-    generate_pdf(report, vehicle_name, pdf_filename)
-    st.success(f"📁 PDF Report saved to `{pdf_filename}`")
+    # Generate PDF in memory
+    pdf_buffer = generate_pdf_buffer(report, vehicle_name)
 
-    # Show download button
-    with open(pdf_filename, "rb") as f:
-        st.download_button(
-            label="⬇️ Download PDF Report",
-            data=f,
-            file_name=os.path.basename(pdf_filename),
-            mime="application/pdf"
-        )
+    # Download button
+    st.download_button(
+        label="⬇️ Download PDF Report",
+        data=pdf_buffer,
+        file_name=f"{datetime.now().strftime('%Y-%m-%d_%H%M')}_{vehicle_name.replace(' ', '_')}.pdf",
+        mime="application/pdf"
+    )
 
 elif uploaded_file:
-    st.warning("Please enter a vehicle name to generate and save the report.")
+    st.warning("Please enter a vehicle name to generate and download the report.")
 
 elif vehicle_name:
     st.info("Please upload a valid `.trc` file to begin diagnosis.")
