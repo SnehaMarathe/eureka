@@ -41,21 +41,19 @@ if not st.session_state["authenticated"]:
     login()
     st.stop()  # This ensures the rest of the app doesn't run unless logged in
 
-# --- Top Header with Logout Button (Right Aligned) ---
-top_left, top_spacer, top_right = st.columns([6, 2, 1])
-with top_right:
-    if st.button("🚪 Logout"):
-        for key in ["authenticated", "username"]:
-            st.session_state.pop(key, None)
-        st.rerun()
-
-# --- Header ---
-col1, col2 = st.columns([1, 6])
+# --- Header with Logout ---
+col1, col2, col3 = st.columns([1, 6, 1])
 with col1:
     st.image("BEM-Logo.png", width=150)
 with col2:
     st.markdown("## 🔧 EurekaCheck - CAN Bus Diagnostic Tool")
     st.write("Upload a `.trc` file from PCAN-View to get a full diagnosis of ECU connectivity, harness, fuse, and connector health.")
+with col3:
+    st.markdown(f"👤 {st.session_state['username']}")
+    if st.button("🚪 Logout"):
+        for key in ["authenticated", "username"]:
+            st.session_state.pop(key, None)
+        st.rerun()
 
 # --- ECU, Fuse, Harness, Connector Map ---
 ecu_connector_map = {
