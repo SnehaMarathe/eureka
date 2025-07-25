@@ -48,16 +48,23 @@ with col_logo:
     st.image("BEM-Logo.png", width=150)
 
 with col_center:
-    st.markdown("<h2 style='text-align: center;'>🔧 EurekaCheck - CAN Bus Diagnostic Tool</h2>", unsafe_allow_html=True)
-    st.markdown("<p style='text-align: center;'>Upload a <code>.trc</code> file from PCAN-View to get a full diagnosis of ECU connectivity, harness, fuse, and connector health.</p>", unsafe_allow_html=True)
+    st.markdown(
+        "<h2 style='text-align: center; margin-bottom: 0;'>🔧 EurekaCheck - CAN Bus Diagnostic Tool</h2>"
+        "<p style='text-align: center; margin-top: 0;'>"
+        "Upload a <code>.trc</code> file from PCAN-View to get a full diagnosis of ECU connectivity, harness, fuse, and connector health."
+        "</p>",
+        unsafe_allow_html=True
+    )
 
 with col_logout:
     st.markdown(f"<div style='text-align: right;'>👤 {st.session_state['username']}</div>", unsafe_allow_html=True)
-    logout_clicked = st.button("🚪 Logout", key="logout_btn")
-    if logout_clicked:
+    if st.button("🚪 Logout", key="logout_btn"):
         for key in ["authenticated", "username"]:
             st.session_state.pop(key, None)
         st.rerun()
+
+# --- Divider Below Header ---
+st.markdown("<hr style='margin-top: 0.5rem; margin-bottom: 1rem;'>", unsafe_allow_html=True)
 
 
 # --- ECU, Fuse, Harness, Connector Map ---
