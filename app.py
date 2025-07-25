@@ -42,7 +42,7 @@ if not st.session_state["authenticated"]:
     st.stop()  # This ensures the rest of the app doesn't run unless logged in
 
 # --- Header with Right-Aligned Username and Logout in One Line ---
-col_logo, col_center, col_right = st.columns([1, 4, 1])
+col_logo, col_center, col_right = st.columns([1, 4, 2])
 
 with col_logo:
     st.image("BEM-Logo.png", width=150)
