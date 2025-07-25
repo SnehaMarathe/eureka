@@ -3,7 +3,10 @@ import re
 import os
 import pandas as pd
 from datetime import datetime
-from collections import defaultdict
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib import colors
+from reportlab.lib.units import inch
 
 # --- Page Config ---
 st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
@@ -16,7 +19,7 @@ with col2:
     st.markdown("## 🔧 EurekaCheck - CAN Bus Diagnostic Tool")
     st.write("Upload a `.trc` file from PCAN-View to get a full diagnosis of ECU connectivity and harness health.")
 
-# --- ECU & Harness Mapping (from Diagnostic PDF) ---
+# --- ECU & Harness Mapping ---
 ecu_map = {
     0x17: ("Instrument Cluster", "Cabin Harness", "N/A"),
     0x0B: ("ABS ECU", "Cabin Harness Pig Tail", "PEE0000025"),
@@ -32,14 +35,45 @@ ecu_map = {
 def extract_source_address(can_id):
     return can_id & 0xFF
 
-# --- Vehicle Metadata Input ---
+def generate_pdf(report_data, vehicle_name, filename):
+    c = canvas.Canvas(filename, pagesize=A4)
+    width, height = A4
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(50, height - 50, f"Diagnostic Report - {vehicle_name}")
+    c.setFont("Helvetica", 10)
+    c.drawString(50, height - 70, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+
+    # Table headers
+    y = height - 100
+    headers = ["ECU", "Source Addr", "Status", "Harness", "Part No."]
+    col_widths = [120, 80, 60, 170, 80]
+    for i, header in enumerate(headers):
+        c.setFillColor(colors.grey)
+        c.rect(50 + sum(col_widths[:i]), y, col_widths[i], 20, fill=1)
+        c.setFillColor(colors.white)
+        c.drawString(55 + sum(col_widths[:i]), y + 5, header)
+
+    # Table rows
+    c.setFillColor(colors.black)
+    y -= 20
+    for row in report_data:
+        if y < 50:  # new page if space is low
+            c.showPage()
+            y = height - 50
+        for i, key in enumerate(["ECU", "Source Address", "Status", "Harness Description", "Harness Part No."]):
+            c.setFillColor(colors.black)
+            c.drawString(55 + sum(col_widths[:i]), y, str(row[key]))
+        y -= 18
+
+    c.save()
+
+# --- Input Vehicle Info ---
 st.markdown("### 🚛 Vehicle Info")
 vehicle_name = st.text_input("Enter Vehicle Name or ID", max_chars=30)
 
-# --- File Upload ---
+# --- Upload File ---
 uploaded_file = st.file_uploader("📁 Upload your `.trc` file", type=["trc"])
 
-# --- Process File ---
 if uploaded_file and vehicle_name.strip():
     content = uploaded_file.read().decode("latin1")
     lines = content.splitlines()
@@ -67,30 +101,28 @@ if uploaded_file and vehicle_name.strip():
 
     df = pd.DataFrame(report)
 
-    # Show diagnosis results
     st.success("Diagnostics completed successfully!")
     st.subheader("📋 ECU Diagnosis Report")
     st.dataframe(df, use_container_width=True)
 
-    # Show missing ECUs
     with st.expander("🔍 Show only MISSING ECUs"):
-        missing_df = df[df["Status"].str.contains("MISSING")]
-        st.table(missing_df)
+        st.table(df[df["Status"].str.contains("MISSING")])
 
-    # Save report
+    # Save PDF
     os.makedirs("reports", exist_ok=True)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H%M")
-    filename = f"reports/{timestamp}_{vehicle_name.replace(' ', '_')}.csv"
-    df.to_csv(filename, index=False)
-    st.success(f"📁 Report saved to `{filename}`")
+    pdf_filename = f"reports/{timestamp}_{vehicle_name.replace(' ', '_')}.pdf"
+    generate_pdf(report, vehicle_name, pdf_filename)
+    st.success(f"📁 PDF Report saved to `{pdf_filename}`")
 
-    # Download button (optional)
-    st.download_button(
-        label="⬇️ Download CSV Report",
-        data=df.to_csv(index=False).encode("utf-8"),
-        file_name=os.path.basename(filename),
-        mime="text/csv"
-    )
+    # Show download button
+    with open(pdf_filename, "rb") as f:
+        st.download_button(
+            label="⬇️ Download PDF Report",
+            data=f,
+            file_name=os.path.basename(pdf_filename),
+            mime="application/pdf"
+        )
 
 elif uploaded_file:
     st.warning("Please enter a vehicle name to generate and save the report.")
