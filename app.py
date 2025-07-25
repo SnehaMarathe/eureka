@@ -7,6 +7,32 @@ from datetime import datetime
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
+import os  # <-- Added for visitor counter
+
+# --- Visitor Counter ---
+def update_visitor_count():
+    counter_file = "counter.txt"
+
+    # Create counter file if it doesn't exist
+    if not os.path.exists(counter_file):
+        with open(counter_file, "w") as f:
+            f.write("0")
+
+    # Read, increment, and save the new count only once per session
+    if "visitor_counted" not in st.session_state:
+        with open(counter_file, "r+") as f:
+            count = int(f.read().strip())
+            count += 1
+            f.seek(0)
+            f.write(str(count))
+            f.truncate()
+        st.session_state["visitor_counted"] = True
+        st.session_state["visitor_count"] = count
+    else:
+        with open(counter_file, "r") as f:
+            st.session_state["visitor_count"] = int(f.read().strip())
+
+update_visitor_count()  # <-- Call the function
 
 # --- User Credentials ---
 USER_CREDENTIALS = {
@@ -26,7 +52,7 @@ def login():
                 st.session_state["authenticated"] = True
                 st.session_state["username"] = username
                 st.success(f"Welcome, {username}!")
-                st.rerun()  # ← This is the updated version
+                st.rerun()
             else:
                 st.error("❌ Invalid username or password.")
 
@@ -39,9 +65,9 @@ if "authenticated" not in st.session_state:
 
 if not st.session_state["authenticated"]:
     login()
-    st.stop()  # This ensures the rest of the app doesn't run unless logged in
+    st.stop()
 
-# --- Header (Logo + Centered Title) ---
+# --- Header (Logo + Centered Title + Visitor Count) ---
 col1, col2, col3 = st.columns([1, 6, 1])
 
 with col1:
@@ -61,11 +87,12 @@ with col2:
     )
 
 with col3:
-    pass  # Empty column to balance the layout
+    st.markdown(
+        f"<p style='text-align: right; color: gray;'>👥 Visitors: {st.session_state['visitor_count']}</p>",
+        unsafe_allow_html=True
+    )
 
-# Optional: Divider below header
 st.markdown("<hr style='margin-top: 0.5rem; margin-bottom: 1rem;'>", unsafe_allow_html=True)
-
 
 # --- ECU, Fuse, Harness, Connector Map ---
 ecu_connector_map = {
@@ -182,7 +209,6 @@ if uploaded_file and vehicle_name.strip():
     with st.expander("🔍 Show only MISSING ECUs"):
         st.table(df[df["Status"].str.contains("MISSING")])
 
-    # Connector-level insight
     st.subheader("🛠️ Connector-Level Diagnosis")
     conn_counts = df[df["Status"] == "❌ MISSING"].groupby("Connector")["ECU"].count()
     for conn, count in conn_counts.items():
@@ -206,19 +232,16 @@ elif vehicle_name:
 st.markdown("---")
 st.markdown("### 🖼️ Diagnostic Visual Reference")
 
-# List of your image filenames
 image_filenames = [
     "Slide3.PNG", "Slide4.PNG", "Slide5.PNG", "Slide6.PNG", "Slide7.PNG",
     "Slide8.PNG", "Slide9.PNG", "Slide10.PNG", "Slide11.PNG", "Slide12.PNG",
     "Slide13.PNG", "Slide14.PNG", "Slide15.PNG"
 ]
 
-# Path to images
 image_paths = [f"static_images/{name}" for name in image_filenames]
 
-# Divide into two "pages"
-page1_images = image_paths[:7]   # First 7
-page2_images = image_paths[6:]   # Remaining 6
+page1_images = image_paths[:7]
+page2_images = image_paths[6:]
 
 col1, col2 = st.columns(2)
 
@@ -243,4 +266,3 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-
