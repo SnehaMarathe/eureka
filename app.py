@@ -10,15 +10,15 @@ from reportlab.lib import colors
 # --- Streamlit Config ---
 st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
 
-# --- Header with Logo ---
+# --- Header ---
 col1, col2 = st.columns([1, 6])
 with col1:
     st.image("BEM-Logo.png", width=150)
 with col2:
     st.markdown("## 🔧 EurekaCheck - CAN Bus Diagnostic Tool")
-    st.write("Upload a `.trc` file from PCAN-View to get a full diagnosis of ECU connectivity, harness status, and power supply integrity.")
+    st.write("Upload a `.trc` file from PCAN-View to get a full diagnosis of ECU connectivity, harness integrity, and power supply.")
 
-# --- ECU → Fuse & Harness Map ---
+# --- ECU ↔ Fuse, Harness, Circuit Map ---
 ecu_fuse_harness_map = {
     "Engine ECU": {
         "fuse": "F42 (30A)",
@@ -76,11 +76,11 @@ ecu_fuse_harness_map = {
     }
 }
 
-# --- Extract CAN Source Address ---
+# --- CAN ID Utility ---
 def extract_source_address(can_id):
     return can_id & 0xFF
 
-# --- Generate PDF Buffer ---
+# --- PDF Generator ---
 def generate_pdf_buffer(report_data, vehicle_name):
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
@@ -100,7 +100,6 @@ def generate_pdf_buffer(report_data, vehicle_name):
         c.drawString(55 + sum(col_widths[:i]), y + 5, header)
 
     y -= 20
-    c.setFillColor(colors.black)
     for row in report_data:
         if y < 50:
             c.showPage()
@@ -114,15 +113,21 @@ def generate_pdf_buffer(report_data, vehicle_name):
     buffer.seek(0)
     return buffer
 
-# --- Rule-Based Reasoning ---
-def run_diagnostic_rules(report):
+# --- Rule Engine ---
+def run_diagnostic_rules(report, has_amt, has_retarder, has_double_tank):
     suggestions = []
     missing_ecus = [r for r in report if "MISSING" in r["Status"]]
-    
-    # Check for grouped fuse failures
+
     fuse_counter = {}
     for ecu in missing_ecus:
-        fuse = ecu_fuse_harness_map.get(ecu["ECU"], {}).get("fuse")
+        name = ecu["ECU"]
+        if name in ["TCU", "Gear Shift Lever"] and not has_amt:
+            continue
+        if name == "Retarder Controller" and not has_retarder:
+            continue
+        if name == "LNG Sensor 2" and not has_double_tank:
+            continue
+        fuse = ecu_fuse_harness_map.get(name, {}).get("fuse")
         if fuse:
             fuse_counter[fuse] = fuse_counter.get(fuse, 0) + 1
 
@@ -130,13 +135,20 @@ def run_diagnostic_rules(report):
         if count >= 2:
             suggestions.append(f"❌ Multiple ECUs missing that share {fuse} — possible blown fuse or power loss.")
 
-    # ECU-specific suggestions
     for ecu in missing_ecus:
-        m = ecu_fuse_harness_map.get(ecu["ECU"])
+        name = ecu["ECU"]
+        if name in ["TCU", "Gear Shift Lever"] and not has_amt:
+            continue
+        if name == "Retarder Controller" and not has_retarder:
+            continue
+        if name == "LNG Sensor 2" and not has_double_tank:
+            continue
+        m = ecu_fuse_harness_map.get(name)
         if m:
             suggestions.append(
-                f"❌ {ecu['ECU']} missing — check {m['harness']} (Part No: {m['part_no']}), and Fuse {m['fuse']} on {m['circuit']} circuit."
+                f"❌ {name} missing — check {m['harness']} (Part No: {m['part_no']}), and Fuse {m['fuse']} on {m['circuit']} circuit."
             )
+
     if not suggestions:
         suggestions.append("✅ All ECUs are responding — no electrical or harness faults detected.")
     return suggestions
@@ -144,6 +156,11 @@ def run_diagnostic_rules(report):
 # --- Vehicle Info Input ---
 st.markdown("### 🚛 Vehicle Info")
 vehicle_name = st.text_input("Enter Vehicle Name or ID", max_chars=30)
+
+st.markdown("### ⚙️ Vehicle Configuration")
+has_double_tank = st.checkbox("Has Double Tank?", value=True)
+has_amt = st.checkbox("Has AMT (Automated Manual Transmission)?", value=True)
+has_retarder = st.checkbox("Has Retarder?", value=True)
 
 # --- File Upload ---
 uploaded_file = st.file_uploader("📁 Upload your `.trc` file", type=["trc"])
@@ -161,9 +178,7 @@ if uploaded_file and vehicle_name.strip():
             src_addr = extract_source_address(can_id)
             found_sources.add(src_addr)
 
-    # Build diagnosis report
-    report = []
-    for addr, (ecu, harness_desc, part_no) in {
+    ecu_map = {
         0x17: ("Instrument Cluster", "Cabin Harness", "N/A"),
         0x0B: ("ABS ECU", "Cabin Harness Pig Tail", "PEE0000025"),
         0xEE: ("Telematics", "Cabin Harness Pig Tail", "PEE0000025"),
@@ -173,7 +188,10 @@ if uploaded_file and vehicle_name.strip():
         0x05: ("Gear Shift Lever", "AMT to Vehicle Wiring Harness", "PEE0000099"),
         0x03: ("TCU", "AMT to Vehicle Wiring Harness", "PEE0000099"),
         0x10: ("Retarder Controller", "Retarder Wiring (Inferred)", "N/A"),
-    }.items():
+    }
+
+    report = []
+    for addr, (ecu, harness_desc, part_no) in ecu_map.items():
         status = "✅ OK" if addr in found_sources else "❌ MISSING"
         fuse = ecu_fuse_harness_map.get(ecu, {}).get("fuse", "-")
         report.append({
@@ -186,23 +204,21 @@ if uploaded_file and vehicle_name.strip():
         })
 
     df = pd.DataFrame(report)
-    st.success("✅ Diagnostics completed successfully!")
 
+    st.success("✅ Diagnostics completed successfully!")
     st.subheader("📋 ECU Status Report")
     st.dataframe(df, use_container_width=True)
 
     with st.expander("🔍 Show only MISSING ECUs"):
         st.table(df[df["Status"].str.contains("MISSING")])
 
-    # 🧠 Smart Diagnostics
     st.subheader("🧠 Diagnostic Insights")
-    for msg in run_diagnostic_rules(report):
+    for msg in run_diagnostic_rules(report, has_amt, has_retarder, has_double_tank):
         if "❌" in msg:
             st.error(msg)
         else:
             st.success(msg)
 
-    # PDF Report
     pdf_buffer = generate_pdf_buffer(report, vehicle_name)
     st.download_button(
         label="⬇️ Download PDF Report",
