@@ -1,15 +1,39 @@
 import streamlit as st
 import re
-from collections import defaultdict
 
-st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
+# Page configuration
+st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="centered")
 
-# --- Show Logo ---
-st.image("BEM-Logo.png", width=150)  # Path to uploaded logo
-st.markdown("## 🔧 EurekaCheck - CAN Bus Diagnostic Tool")
-st.write("Upload a `.trc` file from PCAN-View to get a full diagnosis of ECU connectivity and harness health.")
+# ---- Logo & Header Section ----
+col1, col2, col3 = st.columns([1, 4, 1])
+with col2:
+    st.image("BEM-Logo.png", width=160)
 
-# --- ECU & Harness Mapping (from updated PDF)
+st.markdown(
+    "<h2 style='text-align: center; color: #003366;'>EurekaCheck</h2>"
+    "<h4 style='text-align: center; color: #444;'>CAN Bus Diagnostic Tool</h4>",
+    unsafe_allow_html=True
+)
+
+st.markdown("---")
+
+# ---- Instructions ----
+st.markdown(
+    "<p style='text-align: center; font-size: 16px;'>"
+    "Upload a <code>.trc</code> file from PCAN-View to receive a complete ECU diagnosis, including harness health and missing communication sources."
+    "</p>",
+    unsafe_allow_html=True
+)
+
+# ---- File Uploader ----
+uploaded_file = st.file_uploader(
+    "📁 Upload your `.trc` file below:",
+    type=["trc"],
+    help="You can drag & drop your file or browse. Max file size: 200MB.",
+    label_visibility="visible"
+)
+
+# ---- ECU Mapping ----
 ecu_map = {
     0x17: ("Instrument Cluster", "Cabin Harness", "N/A"),
     0x0B: ("ABS ECU", "Cabin Harness Pig Tail", "PEE0000025"),
@@ -25,14 +49,12 @@ ecu_map = {
 def extract_source_address(can_id):
     return can_id & 0xFF
 
-# --- File Upload ---
-uploaded_file = st.file_uploader("📁 Upload your `.trc` file", type=["trc"])
-
+# ---- File Processing & Diagnosis ----
 if uploaded_file:
     content = uploaded_file.read().decode("latin1")
     lines = content.splitlines()
 
-    # --- Extract Source Addresses from Log ---
+    # Extract seen source addresses
     found_sources = set()
     for line in lines:
         match = re.match(r'\s*\d+\)\s+([\d.]+)\s+Rx\s+([0-9A-Fa-f]{6,8})', line)
@@ -41,7 +63,7 @@ if uploaded_file:
             src_addr = extract_source_address(can_id)
             found_sources.add(src_addr)
 
-    # --- Diagnosis Report ---
+    # Generate diagnosis report
     report = []
     for addr, (ecu, harness_desc, part_no) in ecu_map.items():
         status = "✅ OK" if addr in found_sources else "❌ MISSING"
@@ -53,13 +75,16 @@ if uploaded_file:
             "Harness Part No.": part_no
         })
 
-    st.success("Diagnostics completed!")
-
-    # --- Show Table ---
-    st.subheader("📋 ECU Diagnosis Report")
+    st.markdown("### 📋 ECU Diagnosis Report")
     st.dataframe(report, use_container_width=True)
 
-    # --- Optional Filtering ---
-    with st.expander("🔍 Show only MISSING ECUs"):
+    # Optional filter
+    with st.expander("🔍 Show only missing ECUs"):
         missing_only = [row for row in report if "MISSING" in row["Status"]]
-        st.table(missing_only)
+        if missing_only:
+            st.table(missing_only)
+        else:
+            st.success("All ECUs are communicating. No issues found.")
+
+else:
+    st.info("Please upload a valid `.trc` file to begin diagnosis.")
