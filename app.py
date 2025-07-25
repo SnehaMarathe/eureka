@@ -41,9 +41,9 @@ if not st.session_state["authenticated"]:
     login()
     st.stop()  # This ensures the rest of the app doesn't run unless logged in
 
-# --- Sidebar: User Info & Logout ---
-with st.sidebar:
-    st.markdown(f"👤 Logged in as: **{st.session_state['username']}**")
+# --- Top Header with Logout Button (Right Aligned) ---
+top_left, top_spacer, top_right = st.columns([6, 2, 1])
+with top_right:
     if st.button("🚪 Logout"):
         for key in ["authenticated", "username"]:
             st.session_state.pop(key, None)
