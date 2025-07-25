@@ -105,7 +105,8 @@ def generate_pdf_buffer(report_data, vehicle_name):
         if y < 50:
             c.showPage()
             y = height - 50
-        for i, key in ["ECU", "Source Address", "Status", "Harness Description", "Harness Part No.", "Fuse"]:
+        for i, key in enumerate(["ECU", "Source Address", "Status", "Harness Description", "Harness Part No.", "Fuse"]):
+            c.setFillColor(colors.black)
             c.drawString(55 + sum(col_widths[:i]), y, str(row.get(key, "-")))
         y -= 18
 
