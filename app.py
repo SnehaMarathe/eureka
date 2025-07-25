@@ -8,7 +8,7 @@ st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
 # --- Header with Logo beside Title ---
 col1, col2 = st.columns([1, 6])
 with col1:
-    st.image("BEM-Logo.png", width=70)
+    st.image("BEM-Logo.png", width=200)
 with col2:
     st.markdown("## 🔧 EurekaCheck - CAN Bus Diagnostic Tool")
     st.write("Upload a `.trc` file from PCAN-View to get a full diagnosis of ECU connectivity and harness health.")
