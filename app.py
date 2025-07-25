@@ -11,7 +11,7 @@ from reportlab.lib import colors
 # --- User Credentials ---
 USER_CREDENTIALS = {
     "admin": "admin123",
-    "tech": "eurekacheck2025"
+    "user": "check2025"
 }
 
 def login():
