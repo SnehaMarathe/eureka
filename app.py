@@ -41,25 +41,16 @@ if not st.session_state["authenticated"]:
     login()
     st.stop()  # This ensures the rest of the app doesn't run unless logged in
 
-# --- Header with Right-Aligned Username and Logout ---
-col_logo, col_center, col_right = st.columns([1, 5, 2])  # Adjusted width
+# --- Full Width Layout ---
+logo_col, spacer, user_col = st.columns([1, 6, 2])
 
-with col_logo:
+with logo_col:
     st.image("BEM-Logo.png", width=150)
 
-with col_center:
-    st.markdown(
-        "<h2 style='text-align: center; margin-bottom: 0;'>🔧 EurekaCheck - CAN Bus Diagnostic Tool</h2>"
-        "<p style='text-align: center; margin-top: 0;'>"
-        "Upload a <code>.trc</code> file from PCAN-View to get a full diagnosis of ECU connectivity, harness, fuse, and connector health."
-        "</p>",
-        unsafe_allow_html=True
-    )
-
-with col_right:
+with user_col:
     st.markdown(
         f"""
-        <div style='text-align: right;'>
+        <div style='text-align: right; font-size: 0.9rem;'>
             👤 <strong>{st.session_state['username']}</strong>
             &nbsp;|&nbsp;
             <a href='#' onclick="window.location.reload();" style='text-decoration: none; color: #d00;'>🚪 Logout</a>
@@ -68,11 +59,29 @@ with col_right:
         unsafe_allow_html=True
     )
 
-# --- Logout Logic ---
-if "_logout_triggered" not in st.session_state:
-    st.session_state["_logout_triggered"] = False
+# --- Centered Header (full-width) ---
+st.markdown(
+    """
+    <div style='text-align: center; margin-top: -40px;'>
+        <h2 style='margin-bottom: 0;'>🔧 EurekaCheck - CAN Bus Diagnostic Tool</h2>
+        <p style='margin-top: 0; font-size: 1rem;'>
+            Upload a <code>.trc</code> file from PCAN-View to get a full diagnosis of ECU connectivity, harness, fuse, and connector health.
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True
+)
 
-# This JavaScript hack sets a hidden checkbox when the logout link is clicked
+# --- Divider ---
+st.markdown("<hr style='margin-top: 0.5rem; margin-bottom: 1rem;'>", unsafe_allow_html=True)
+
+# --- Logout Session Logic ---
+if st.query_params.get("logout") == "true":
+    for key in ["authenticated", "username"]:
+        st.session_state.pop(key, None)
+    st.rerun()
+
+# Optional: re-enable logout trigger via script
 st.markdown("""
 <script>
 const logoutLink = window.parent.document.querySelector("a[href='#']");
@@ -83,12 +92,6 @@ if (logoutLink) {
 }
 </script>
 """, unsafe_allow_html=True)
-
-# Optional: use button for controlled logout
-if st.query_params.get("logout") == "true":
-    for key in ["authenticated", "username"]:
-        st.session_state.pop(key, None)
-    st.rerun()
 
 
 # --- ECU, Fuse, Harness, Connector Map ---
