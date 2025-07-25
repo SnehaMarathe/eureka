@@ -41,7 +41,7 @@ if not st.session_state["authenticated"]:
     login()
     st.stop()  # This ensures the rest of the app doesn't run unless logged in
 
-# --- Header with Proper Right-Aligned Username + Logout ---
+# --- Header with Right-Aligned Username and Logout in One Line ---
 col_logo, col_center, col_right = st.columns([1, 4, 1])
 
 with col_logo:
@@ -57,26 +57,19 @@ with col_center:
     )
 
 with col_right:
-    st.markdown(
-        f"""
-        <div style='text-align: right;'>
-            <span style='font-weight: bold;'>👤 {st.session_state["username"]}</span><br>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-    # Align logout button right using empty space
-    st.markdown("<div style='text-align: right;'>", unsafe_allow_html=True)
-    logout_clicked = st.button("🚪 Logout", key="logout_btn")
-    st.markdown("</div>", unsafe_allow_html=True)
-    
-    if logout_clicked:
-        for key in ["authenticated", "username"]:
-            st.session_state.pop(key, None)
-        st.rerun()
+    # Create a right-aligned horizontal block
+    logout_col1, logout_col2 = st.columns([5, 1])
+    with logout_col1:
+        pass
+    with logout_col2:
+        if st.button(f"👤 {st.session_state['username']}  |  🚪 Logout", key="logout_btn"):
+            for key in ["authenticated", "username"]:
+                st.session_state.pop(key, None)
+            st.rerun()
 
 # --- Divider Below Header ---
 st.markdown("<hr style='margin-top: 0.5rem; margin-bottom: 1rem;'>", unsafe_allow_html=True)
+
 
 # --- ECU, Fuse, Harness, Connector Map ---
 ecu_connector_map = {
