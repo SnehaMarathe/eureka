@@ -8,6 +8,31 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
 
+# --- User Credentials ---
+USER_CREDENTIALS = {
+    "admin": "admin123",
+    "tech": "eurekacheck2025"
+}
+
+def login():
+    st.markdown("## 🔐 User Login")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    if username in USER_CREDENTIALS and USER_CREDENTIALS[username] == password:
+        st.session_state["authenticated"] = True
+        st.session_state["username"] = username
+        st.success(f"Welcome, {username}!")
+        st.experimental_rerun()
+    elif username or password:
+        st.error("❌ Invalid username or password.")
+
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+
+if not st.session_state["authenticated"]:
+    login()
+    st.stop()
+
 # --- Streamlit Config ---
 st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
 
