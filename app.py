@@ -6,7 +6,7 @@ st.set_page_config(page_title="EurekaCheck - Diagnostic", layout="centered")
 # === Header with Logo and Title ===
 col1, col2 = st.columns([1, 4])
 with col1:
-    st.image("9c3aa740-127f-4df2-80c8-2cf298fac4fd.png", width=100)
+    st.image("BEM-Logo.png", width=100)
 with col2:
     st.markdown("<h1 style='margin-bottom:0;'>EurekaCheck</h1>", unsafe_allow_html=True)
     st.caption("Advanced CAN Bus Diagnostic Tool for Blue Energy Motors")
