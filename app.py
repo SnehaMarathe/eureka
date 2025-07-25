@@ -41,19 +41,24 @@ if not st.session_state["authenticated"]:
     login()
     st.stop()  # This ensures the rest of the app doesn't run unless logged in
 
-# --- Header with Logout ---
-col1, col2, col3 = st.columns([1, 6, 1])
-with col1:
+# --- Clean Header with Centered Title and Right-Aligned Logout ---
+col_logo, col_center, col_logout = st.columns([1, 4, 1])
+
+with col_logo:
     st.image("BEM-Logo.png", width=150)
-with col2:
-    st.markdown("## 🔧 EurekaCheck - CAN Bus Diagnostic Tool")
-    st.write("Upload a `.trc` file from PCAN-View to get a full diagnosis of ECU connectivity, harness, fuse, and connector health.")
-with col3:
-    st.markdown(f"👤 {st.session_state['username']}")
-    if st.button("🚪 Logout"):
+
+with col_center:
+    st.markdown("<h2 style='text-align: center;'>🔧 EurekaCheck - CAN Bus Diagnostic Tool</h2>", unsafe_allow_html=True)
+    st.markdown("<p style='text-align: center;'>Upload a <code>.trc</code> file from PCAN-View to get a full diagnosis of ECU connectivity, harness, fuse, and connector health.</p>", unsafe_allow_html=True)
+
+with col_logout:
+    st.markdown(f"<div style='text-align: right;'>👤 {st.session_state['username']}</div>", unsafe_allow_html=True)
+    logout_clicked = st.button("🚪 Logout", key="logout_btn")
+    if logout_clicked:
         for key in ["authenticated", "username"]:
             st.session_state.pop(key, None)
         st.rerun()
+
 
 # --- ECU, Fuse, Harness, Connector Map ---
 ecu_connector_map = {
