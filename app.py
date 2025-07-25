@@ -3,10 +3,13 @@ import re
 from collections import defaultdict
 
 st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
-st.title("🔧 EurekaCheck - CAN Bus Diagnostic Tool")
+
+# --- Show Logo ---
+st.image("BEM-Logo.png", width=150)  # Path to uploaded logo
+st.markdown("## 🔧 EurekaCheck - CAN Bus Diagnostic Tool")
 st.write("Upload a `.trc` file from PCAN-View to get a full diagnosis of ECU connectivity and harness health.")
 
-# --- ECU & Harness Mapping (from PDF)
+# --- ECU & Harness Mapping (from updated PDF)
 ecu_map = {
     0x17: ("Instrument Cluster", "Cabin Harness", "N/A"),
     0x0B: ("ABS ECU", "Cabin Harness Pig Tail", "PEE0000025"),
@@ -60,4 +63,3 @@ if uploaded_file:
     with st.expander("🔍 Show only MISSING ECUs"):
         missing_only = [row for row in report if "MISSING" in row["Status"]]
         st.table(missing_only)
-
