@@ -184,3 +184,14 @@ with col2:
     for img_path in page2_images:
         st.image(img_path, use_container_width=True)
 
+# --- Footer / Legal Notice ---
+st.markdown("---")
+st.markdown(
+    "<div style='text-align: center; font-size: 0.85em; color: gray;'>"
+    "© 2025 Blue Energy Motors All rights reserved. "
+    "This diagnostic tool and its associated materials are proprietary and intended for authorized diagnostic and engineering use only. "
+    "Unauthorized reproduction, distribution, or modification is strictly prohibited."
+    "</div>",
+    unsafe_allow_html=True
+)
+
