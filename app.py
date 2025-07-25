@@ -169,8 +169,8 @@ image_filenames = [
 image_paths = [f"static_images/{name}" for name in image_filenames]
 
 # Divide into two "pages"
-page1_images = image_paths[:8]   # First 8
-page2_images = image_paths[8:]   # Remaining 7
+page1_images = image_paths[:7]   # First 7
+page2_images = image_paths[6:]   # Remaining 6
 
 col1, col2 = st.columns(2)
 
