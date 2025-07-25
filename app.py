@@ -16,22 +16,20 @@ USER_CREDENTIALS = {
 
 def login():
     st.markdown("## 🔐 User Login")
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-    if username in USER_CREDENTIALS and USER_CREDENTIALS[username] == password:
-        st.session_state["authenticated"] = True
-        st.session_state["username"] = username
-        st.success(f"Welcome, {username}!")
-        st.experimental_rerun()
-    elif username or password:
-        st.error("❌ Invalid username or password.")
+    with st.form("login_form"):
+        username = st.text_input("Username", key="username_input")
+        password = st.text_input("Password", type="password", key="password_input")
+        submitted = st.form_submit_button("🔓 Login")
 
-if "authenticated" not in st.session_state:
-    st.session_state["authenticated"] = False
+        if submitted:
+            if username in USER_CREDENTIALS and USER_CREDENTIALS[username] == password:
+                st.session_state["authenticated"] = True
+                st.session_state["username"] = username
+                st.success(f"Welcome, {username}!")
+                st.experimental_rerun()
+            else:
+                st.error("❌ Invalid username or password.")
 
-if not st.session_state["authenticated"]:
-    login()
-    st.stop()
 
 # --- Streamlit Config ---
 st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
