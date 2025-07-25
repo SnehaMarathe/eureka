@@ -41,57 +41,30 @@ if not st.session_state["authenticated"]:
     login()
     st.stop()  # This ensures the rest of the app doesn't run unless logged in
 
-# --- Full Width Layout ---
-logo_col, spacer, user_col = st.columns([1, 6, 2])
+# --- Header (Logo + Centered Title) ---
+col1, col2, col3 = st.columns([1, 6, 1])
 
-with logo_col:
+with col1:
     st.image("BEM-Logo.png", width=150)
 
-with user_col:
+with col2:
     st.markdown(
-        f"""
-        <div style='text-align: right; font-size: 0.9rem;'>
-            👤 <strong>{st.session_state['username']}</strong>
-            &nbsp;|&nbsp;
-            <a href='#' onclick="window.location.reload();" style='text-decoration: none; color: #d00;'>🚪 Logout</a>
+        """
+        <div style='text-align: center;'>
+            <h2 style='margin-bottom: 0;'>🔧 EurekaCheck - CAN Bus Diagnostic Tool</h2>
+            <p style='margin-top: 0; font-size: 1rem;'>
+                Upload a <code>.trc</code> file from PCAN-View to get a full diagnosis of ECU connectivity, harness, fuse, and connector health.
+            </p>
         </div>
         """,
         unsafe_allow_html=True
     )
 
-# --- Centered Header (full-width) ---
-st.markdown(
-    """
-    <div style='text-align: center; margin-top: -40px;'>
-        <h2 style='margin-bottom: 0;'>🔧 EurekaCheck - CAN Bus Diagnostic Tool</h2>
-        <p style='margin-top: 0; font-size: 1rem;'>
-            Upload a <code>.trc</code> file from PCAN-View to get a full diagnosis of ECU connectivity, harness, fuse, and connector health.
-        </p>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+with col3:
+    pass  # Empty column to balance the layout
 
-# --- Divider ---
+# Optional: Divider below header
 st.markdown("<hr style='margin-top: 0.5rem; margin-bottom: 1rem;'>", unsafe_allow_html=True)
-
-# --- Logout Session Logic ---
-if st.query_params.get("logout") == "true":
-    for key in ["authenticated", "username"]:
-        st.session_state.pop(key, None)
-    st.rerun()
-
-# Optional: re-enable logout trigger via script
-st.markdown("""
-<script>
-const logoutLink = window.parent.document.querySelector("a[href='#']");
-if (logoutLink) {
-    logoutLink.addEventListener('click', function() {
-        fetch('/?logout=true');
-    });
-}
-</script>
-""", unsafe_allow_html=True)
 
 
 # --- ECU, Fuse, Harness, Connector Map ---
