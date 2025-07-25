@@ -41,8 +41,8 @@ if not st.session_state["authenticated"]:
     login()
     st.stop()  # This ensures the rest of the app doesn't run unless logged in
 
-# --- Header with Right-Aligned Username and Logout in One Line ---
-col_logo, col_center, col_right = st.columns([1, 4, 4])
+# --- Header with Right-Aligned Username and Logout ---
+col_logo, col_center, col_right = st.columns([1, 5, 2])  # Adjusted width
 
 with col_logo:
     st.image("BEM-Logo.png", width=150)
@@ -57,18 +57,38 @@ with col_center:
     )
 
 with col_right:
-    # Create a right-aligned horizontal block
-    logout_col1, logout_col2 = st.columns([5, 1])
-    with logout_col1:
-        pass
-    with logout_col2:
-        if st.button(f"👤 {st.session_state['username']}  |  🚪 Logout", key="logout_btn"):
-            for key in ["authenticated", "username"]:
-                st.session_state.pop(key, None)
-            st.rerun()
+    st.markdown(
+        f"""
+        <div style='text-align: right;'>
+            👤 <strong>{st.session_state['username']}</strong>
+            &nbsp;|&nbsp;
+            <a href='#' onclick="window.location.reload();" style='text-decoration: none; color: #d00;'>🚪 Logout</a>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
-# --- Divider Below Header ---
-st.markdown("<hr style='margin-top: 0.5rem; margin-bottom: 1rem;'>", unsafe_allow_html=True)
+# --- Logout Logic ---
+if "_logout_triggered" not in st.session_state:
+    st.session_state["_logout_triggered"] = False
+
+# This JavaScript hack sets a hidden checkbox when the logout link is clicked
+st.markdown("""
+<script>
+const logoutLink = window.parent.document.querySelector("a[href='#']");
+if (logoutLink) {
+    logoutLink.addEventListener('click', function() {
+        fetch('/?logout=true');
+    });
+}
+</script>
+""", unsafe_allow_html=True)
+
+# Optional: use button for controlled logout
+if st.query_params.get("logout") == "true":
+    for key in ["authenticated", "username"]:
+        st.session_state.pop(key, None)
+    st.rerun()
 
 
 # --- ECU, Fuse, Harness, Connector Map ---
