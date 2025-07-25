@@ -1,3 +1,4 @@
+# app.py
 import streamlit as st
 import re
 import io
@@ -16,64 +17,19 @@ with col1:
     st.image("BEM-Logo.png", width=150)
 with col2:
     st.markdown("## 🔧 EurekaCheck - CAN Bus Diagnostic Tool")
-    st.write("Upload a `.trc` file from PCAN-View to get a full diagnosis of ECU connectivity, harness integrity, and power supply.")
+    st.write("Upload a `.trc` file from PCAN-View to get a full diagnosis of ECU connectivity, harness, fuse, and connector health.")
 
-# --- ECU ↔ Fuse, Harness, Circuit Map ---
-ecu_fuse_harness_map = {
-    "Engine ECU": {
-        "fuse": "F42 (30A)",
-        "harness": "Front Chassis Wiring Harness",
-        "part_no": "PEE0000013",
-        "circuit": "Engine Power Supply"
-    },
-    "ABS ECU": {
-        "fuse": "F47 (5A)",
-        "harness": "Cabin Harness Pig Tail",
-        "part_no": "PEE0000025",
-        "circuit": "Brake Circuit"
-    },
-    "Telematics": {
-        "fuse": "F47 (5A)",
-        "harness": "Cabin Harness Pig Tail",
-        "part_no": "PEE0000025",
-        "circuit": "Telematics Supply"
-    },
-    "Instrument Cluster": {
-        "fuse": "F46 (10A)",
-        "harness": "Cabin Harness",
-        "part_no": "N/A",
-        "circuit": "Indicator Circuit"
-    },
-    "TCU": {
-        "fuse": "F43 (15A)",
-        "harness": "AMT to Vehicle Wiring Harness",
-        "part_no": "PEE0000099",
-        "circuit": "Transmission System"
-    },
-    "Gear Shift Lever": {
-        "fuse": "F43 (15A)",
-        "harness": "AMT to Vehicle Wiring Harness",
-        "part_no": "PEE0000099",
-        "circuit": "Gear Control"
-    },
-    "LNG Sensor 1": {
-        "fuse": "F52 (5A)",
-        "harness": "Rear Chassis / Pig Tail (Double Tank)",
-        "part_no": "PEE0000014 / PEE0000081",
-        "circuit": "LNG Level Sensor"
-    },
-    "LNG Sensor 2": {
-        "fuse": "F52 (5A)",
-        "harness": "Pig Tail for Double Tank",
-        "part_no": "PEE0000081",
-        "circuit": "LNG Level Sensor"
-    },
-    "Retarder Controller": {
-        "fuse": "F49 (10A)",
-        "harness": "Retarder Wiring (Inferred)",
-        "part_no": "N/A",
-        "circuit": "Retarder Braking System"
-    }
+# --- ECU, Fuse, Harness, Connector Map ---
+ecu_connector_map = {
+    "Engine ECU": {"connector": "Connector 4", "location": "Front left engine bay near pre-fuse box", "harness": "Front Chassis Wiring Harness", "fuse": "F42"},
+    "ABS ECU": {"connector": "Connector 3", "location": "Cabin firewall, near brake switch", "harness": "Cabin Harness Pig Tail", "fuse": "F47"},
+    "Telematics": {"connector": "Cabin Interface Connector (Brown)", "location": "Behind dashboard, cabin side", "harness": "Cabin Harness Pig Tail", "fuse": "F47"},
+    "Instrument Cluster": {"connector": "89E", "location": "Dashboard behind cluster unit", "harness": "Cabin Harness", "fuse": "F46"},
+    "TCU": {"connector": "AMT Gearbox Inline Connector", "location": "Under chassis near gearbox", "harness": "AMT to Vehicle Wiring Harness", "fuse": "F43"},
+    "Gear Shift Lever": {"connector": "AMT Gear Shifter Inline Connector", "location": "Cabin floor, gear lever base", "harness": "AMT to Vehicle Wiring Harness", "fuse": "F43"},
+    "LNG Sensor 1": {"connector": "Rear Harness Inline", "location": "Left rear chassis, tank area", "harness": "Rear Chassis / Pig Tail", "fuse": "F52"},
+    "LNG Sensor 2": {"connector": "Pig Tail Tank Sensor", "location": "Right rear tank (if double tank)", "harness": "Pig Tail for Double Tank", "fuse": "F52"},
+    "Retarder Controller": {"connector": "Retarder Module Connector", "location": "Chassis, near prop shaft", "harness": "Retarder Wiring", "fuse": "F49"},
 }
 
 # --- CAN ID Utility ---
@@ -91,8 +47,8 @@ def generate_pdf_buffer(report_data, vehicle_name):
     c.drawString(50, height - 70, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
     y = height - 100
-    headers = ["ECU", "Source Addr", "Status", "Harness", "Part No.", "Fuse"]
-    col_widths = [100, 70, 60, 150, 90, 60]
+    headers = ["ECU", "Source Addr", "Status", "Connector", "Location", "Fuse"]
+    col_widths = [100, 70, 60, 120, 120, 50]
     for i, header in enumerate(headers):
         c.setFillColor(colors.grey)
         c.rect(50 + sum(col_widths[:i]), y, col_widths[i], 20, fill=1)
@@ -104,7 +60,7 @@ def generate_pdf_buffer(report_data, vehicle_name):
         if y < 50:
             c.showPage()
             y = height - 50
-        for i, key in enumerate(["ECU", "Source Address", "Status", "Harness Description", "Harness Part No.", "Fuse"]):
+        for i, key in enumerate(["ECU", "Source Address", "Status", "Connector", "Location", "Fuse"]):
             c.setFillColor(colors.black)
             c.drawString(55 + sum(col_widths[:i]), y, str(row.get(key, "-")))
         y -= 18
@@ -113,53 +69,13 @@ def generate_pdf_buffer(report_data, vehicle_name):
     buffer.seek(0)
     return buffer
 
-# --- Rule Engine ---
-def run_diagnostic_rules(report, has_amt, has_retarder, has_double_tank):
-    suggestions = []
-    missing_ecus = [r for r in report if "MISSING" in r["Status"]]
-
-    fuse_counter = {}
-    for ecu in missing_ecus:
-        name = ecu["ECU"]
-        if name in ["TCU", "Gear Shift Lever"] and not has_amt:
-            continue
-        if name == "Retarder Controller" and not has_retarder:
-            continue
-        if name == "LNG Sensor 2" and not has_double_tank:
-            continue
-        fuse = ecu_fuse_harness_map.get(name, {}).get("fuse")
-        if fuse:
-            fuse_counter[fuse] = fuse_counter.get(fuse, 0) + 1
-
-    for fuse, count in fuse_counter.items():
-        if count >= 2:
-            suggestions.append(f"❌ Multiple ECUs missing that share {fuse} — possible blown fuse or power loss.")
-
-    for ecu in missing_ecus:
-        name = ecu["ECU"]
-        if name in ["TCU", "Gear Shift Lever"] and not has_amt:
-            continue
-        if name == "Retarder Controller" and not has_retarder:
-            continue
-        if name == "LNG Sensor 2" and not has_double_tank:
-            continue
-        m = ecu_fuse_harness_map.get(name)
-        if m:
-            suggestions.append(
-                f"❌ {name} missing — check {m['harness']} (Part No: {m['part_no']}), and Fuse {m['fuse']} on {m['circuit']} circuit."
-            )
-
-    if not suggestions:
-        suggestions.append("✅ All ECUs are responding — no electrical or harness faults detected.")
-    return suggestions
-
-# --- Vehicle Info Input ---
+# --- Vehicle Config ---
 st.markdown("### 🚛 Vehicle Info")
 vehicle_name = st.text_input("Enter Vehicle Name or ID", max_chars=30)
 
 st.markdown("### ⚙️ Vehicle Configuration")
 has_double_tank = st.checkbox("Has Double Tank?", value=True)
-has_amt = st.checkbox("Has AMT (Automated Manual Transmission)?", value=True)
+has_amt = st.checkbox("Has AMT?", value=True)
 has_retarder = st.checkbox("Has Retarder?", value=True)
 
 # --- File Upload ---
@@ -179,28 +95,34 @@ if uploaded_file and vehicle_name.strip():
             found_sources.add(src_addr)
 
     ecu_map = {
-        0x17: ("Instrument Cluster", "Cabin Harness", "N/A"),
-        0x0B: ("ABS ECU", "Cabin Harness Pig Tail", "PEE0000025"),
-        0xEE: ("Telematics", "Cabin Harness Pig Tail", "PEE0000025"),
-        0x00: ("Engine ECU", "Front Chassis Wiring Harness", "PEE0000013"),
-        0x4E: ("LNG Sensor 1", "Rear Chassis / Pig Tail (double tank)", "PEE0000014 / PEE0000081"),
-        0x4F: ("LNG Sensor 2", "Pig Tail for Double Tank", "PEE0000081"),
-        0x05: ("Gear Shift Lever", "AMT to Vehicle Wiring Harness", "PEE0000099"),
-        0x03: ("TCU", "AMT to Vehicle Wiring Harness", "PEE0000099"),
-        0x10: ("Retarder Controller", "Retarder Wiring (Inferred)", "N/A"),
+        0x17: "Instrument Cluster",
+        0x0B: "ABS ECU",
+        0xEE: "Telematics",
+        0x00: "Engine ECU",
+        0x4E: "LNG Sensor 1",
+        0x4F: "LNG Sensor 2",
+        0x05: "Gear Shift Lever",
+        0x03: "TCU",
+        0x10: "Retarder Controller",
     }
 
     report = []
-    for addr, (ecu, harness_desc, part_no) in ecu_map.items():
+    for addr, ecu in ecu_map.items():
+        if ecu == "LNG Sensor 2" and not has_double_tank:
+            continue
+        if ecu in ["TCU", "Gear Shift Lever"] and not has_amt:
+            continue
+        if ecu == "Retarder Controller" and not has_retarder:
+            continue
         status = "✅ OK" if addr in found_sources else "❌ MISSING"
-        fuse = ecu_fuse_harness_map.get(ecu, {}).get("fuse", "-")
+        conn = ecu_connector_map.get(ecu, {})
         report.append({
             "ECU": ecu,
             "Source Address": f"0x{addr:02X}",
             "Status": status,
-            "Harness Description": harness_desc,
-            "Harness Part No.": part_no,
-            "Fuse": fuse
+            "Connector": conn.get("connector", "-"),
+            "Location": conn.get("location", "-"),
+            "Fuse": conn.get("fuse", "-")
         })
 
     df = pd.DataFrame(report)
@@ -212,12 +134,12 @@ if uploaded_file and vehicle_name.strip():
     with st.expander("🔍 Show only MISSING ECUs"):
         st.table(df[df["Status"].str.contains("MISSING")])
 
-    st.subheader("🧠 Diagnostic Insights")
-    for msg in run_diagnostic_rules(report, has_amt, has_retarder, has_double_tank):
-        if "❌" in msg:
-            st.error(msg)
-        else:
-            st.success(msg)
+    # Connector-level insight
+    st.subheader("🛠️ Connector-Level Diagnosis")
+    conn_counts = df[df["Status"] == "❌ MISSING"].groupby("Connector")["ECU"].count()
+    for conn, count in conn_counts.items():
+        if count >= 2:
+            st.error(f"❌ Multiple ECUs missing on {conn} — check connector at {ecu_connector_map.get(df[df['Connector'] == conn]['ECU'].iloc[0], {}).get('location', '-')}")
 
     pdf_buffer = generate_pdf_buffer(report, vehicle_name)
     st.download_button(
