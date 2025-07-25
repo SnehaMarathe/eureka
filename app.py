@@ -158,28 +158,29 @@ elif vehicle_name:
 st.markdown("---")
 st.markdown("### 🖼️ Diagnostic Visual Reference")
 
-# List of your image filenames (adjust or extend as needed)
+# List of your image filenames
 image_filenames = [
     "Slide3.PNG", "Slide4.PNG", "Slide5.PNG", "Slide6.PNG", "Slide7.PNG",
     "Slide8.PNG", "Slide9.PNG", "Slide10.PNG", "Slide11.PNG", "Slide12.PNG",
     "Slide13.PNG", "Slide14.PNG", "Slide15.PNG"
 ]
 
-# Prepend folder path if needed
+# Path to images
 image_paths = [f"static_images/{name}" for name in image_filenames]
 
-# Divide into two pages
-page1_images = image_paths[:8]   # First 8 images on the left
-page2_images = image_paths[8:]   # Remaining 7 images on the right
+# Divide into two "pages"
+page1_images = image_paths[:8]   # First 8
+page2_images = image_paths[8:]   # Remaining 7
 
 col1, col2 = st.columns(2)
 
 with col1:
     st.markdown("**Page 1**")
     for img_path in page1_images:
-        st.image(img_path, use_column_width=True)
+        st.image(img_path, use_container_width=True)
 
 with col2:
     st.markdown("**Page 2**")
     for img_path in page2_images:
-        st.image(img_path, use_column_width=True)
+        st.image(img_path, use_container_width=True)
+
