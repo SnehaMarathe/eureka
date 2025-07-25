@@ -30,9 +30,16 @@ def login():
             else:
                 st.error("❌ Invalid username or password.")
 
-
 # --- Streamlit Config ---
 st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
+
+# --- Authentication Logic ---
+if "authenticated" not in st.session_state:
+    st.session_state["authenticated"] = False
+
+if not st.session_state["authenticated"]:
+    login()
+    st.stop()  # This ensures the rest of the app doesn't run unless logged in
 
 # --- Header ---
 col1, col2 = st.columns([1, 6])
