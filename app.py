@@ -7,6 +7,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
 import os
+from collections import defaultdict
 
 # --- Visitor Counter ---
 def update_visitor_count():
@@ -41,7 +42,6 @@ def login():
         username = st.text_input("Username", key="username_input")
         password = st.text_input("Password", type="password", key="password_input")
         submitted = st.form_submit_button("🔓 Login")
-
         if submitted:
             if username in USER_CREDENTIALS and USER_CREDENTIALS[username] == password:
                 st.session_state["authenticated"] = True
@@ -89,7 +89,7 @@ with col3:
 
 st.markdown("<hr style='margin-top: 0.5rem; margin-bottom: 1rem;'>", unsafe_allow_html=True)
 
-# --- ECU Map ---
+# --- ECU Info Map ---
 ecu_connector_map = {
     "Engine ECU": {"connector": "Connector 4", "location": "Front left engine bay near pre-fuse box", "harness": "Front Chassis Wiring Harness", "fuse": "F42"},
     "ABS ECU": {"connector": "Connector 3", "location": "Cabin firewall, near brake switch", "harness": "Cabin Harness Pig Tail", "fuse": "F47"},
@@ -115,7 +115,6 @@ def generate_pdf_buffer(report_data, vehicle_name):
     c.drawString(50, height - 50, f"Diagnostic Report - {vehicle_name}")
     c.setFont("Helvetica", 10)
     c.drawString(50, height - 70, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-
     y = height - 100
     headers = ["ECU", "Source Addr", "Status", "Connector", "Location", "Fuse"]
     col_widths = [100, 70, 60, 120, 120, 50]
@@ -124,7 +123,6 @@ def generate_pdf_buffer(report_data, vehicle_name):
         c.rect(50 + sum(col_widths[:i]), y, col_widths[i], 20, fill=1)
         c.setFillColor(colors.white)
         c.drawString(55 + sum(col_widths[:i]), y + 5, header)
-
     y -= 20
     for row in report_data:
         if y < 50:
@@ -134,7 +132,6 @@ def generate_pdf_buffer(report_data, vehicle_name):
             c.setFillColor(colors.black)
             c.drawString(55 + sum(col_widths[:i]), y, str(row.get(key, "-")))
         y -= 18
-
     c.save()
     buffer.seek(0)
     return buffer
@@ -196,9 +193,57 @@ if uploaded_file and vehicle_name.strip():
 
     df = pd.DataFrame(report)
 
+    # --- Intelligent Diagnosis ---
+    def infer_root_causes(df):
+        causes = {"Fuse": defaultdict(list), "Connector": defaultdict(list), "Harness": defaultdict(list)}
+        for _, row in df[df["Status"] == "❌ MISSING"].iterrows():
+            causes["Fuse"][row["Fuse"]].append(row["ECU"])
+            causes["Connector"][row["Connector"]].append(row["ECU"])
+            harness = ecu_connector_map.get(row["ECU"], {}).get("harness", "-")
+            causes["Harness"][harness].append(row["ECU"])
+        ranked_causes = []
+        for cause_type, items in causes.items():
+            for item, affected_ecus in items.items():
+                total = sum(
+                    1 for row in df.itertuples()
+                    if (row.Fuse == item if cause_type == "Fuse"
+                        else row.Connector == item if cause_type == "Connector"
+                        else ecu_connector_map.get(row.ECU, {}).get("harness") == item)
+                )
+                score = len(affected_ecus) / total if total > 0 else 0
+                ranked_causes.append({
+                    "Type": cause_type,
+                    "Component": item,
+                    "Affected ECUs": affected_ecus,
+                    "Missing": len(affected_ecus),
+                    "Total": total,
+                    "Confidence": round(score * 100)
+                })
+        ranked_causes.sort(key=lambda x: (-x["Confidence"], -x["Missing"]))
+        return ranked_causes
+
+    root_cause_results = infer_root_causes(df)
+
     st.success("✅ Diagnostics completed successfully!")
     st.subheader("📋 ECU Status Report")
     st.dataframe(df, use_container_width=True)
+
+    st.subheader("🧠 Inferred Root Causes")
+    if root_cause_results:
+        for cause in root_cause_results:
+            st.markdown(
+                f"""
+                <div style='border:1px solid #ddd; border-radius:10px; padding:10px; margin-bottom:10px; background:#fffbe6'>
+                    <strong>Type:</strong> {cause["Type"]} &nbsp;&nbsp;
+                    <strong>Component:</strong> <code>{cause["Component"]}</code><br>
+                    <strong>Affected ECUs:</strong> {", ".join(cause["Affected ECUs"])}<br>
+                    <strong>Missing:</strong> {cause["Missing"]} / {cause["Total"]} ({cause["Confidence"]}% confidence)
+                </div>
+                """,
+                unsafe_allow_html=True
+            )
+    else:
+        st.info("✅ No root causes inferred. All components appear functional.")
 
     with st.expander("🔍 Show only MISSING ECUs"):
         st.table(df[df["Status"].str.contains("MISSING")])
@@ -222,24 +267,11 @@ if uploaded_file and vehicle_name.strip():
     st.markdown("### 🖼️ Diagnostic Visual Reference")
 
     slide_map = {
-        "Connector 3": [12],
-        "Connector 4": [3],
-        "89E": [5, 6, 7, 8, 9],
-        "Cabin Interface Connector (Brown)": [4],
-        "F47": [6],
-        "F46": [6],
-        "F42": [3],
-        "F43": [3],
-        "F52": [3],
-        "ABS ECU": [12],
-        "Telematics": [4],
-        "Instrument Cluster": [5, 6, 7],
-        "Engine ECU": [3],
-        "Gear Shift Lever": [3],
-        "TCU": [3],
-        "LNG Sensor 1": [3],
-        "LNG Sensor 2": [3],
-        "Retarder Controller": [3],
+        "Connector 3": [12], "Connector 4": [3], "89E": [5, 6, 7, 8, 9],
+        "Cabin Interface Connector (Brown)": [4], "F47": [6], "F46": [6], "F42": [3],
+        "F43": [3], "F52": [3], "ABS ECU": [12], "Telematics": [4], "Instrument Cluster": [5, 6, 7],
+        "Engine ECU": [3], "Gear Shift Lever": [3], "TCU": [3], "LNG Sensor 1": [3],
+        "LNG Sensor 2": [3], "Retarder Controller": [3]
     }
 
     missing_slides = set()
@@ -249,19 +281,16 @@ if uploaded_file and vehicle_name.strip():
                 missing_slides.update(slide_map.get(key, []))
 
     if missing_slides:
-        sorted_slides = sorted(missing_slides)
-        st.success(f"📌 Based on the missing ECUs, the following slide(s) are relevant for debugging: {', '.join(f'Slide {s}' for s in sorted_slides)}")
-
-        for slide_num in sorted_slides:
-            image_path = f"static_images/Slide{slide_num}.PNG"
-            st.image(image_path, caption=f"Slide {slide_num}", use_container_width=True)
+        st.success(f"📌 Relevant slides for missing ECUs: {', '.join(f'Slide {s}' for s in sorted(missing_slides))}")
+        for slide_num in sorted(missing_slides):
+            st.image(f"static_images/Slide{slide_num}.PNG", caption=f"Slide {slide_num}", use_container_width=True)
     else:
-        st.info("✅ No ECUs are missing — all connectors and fuses appear functional.")
+        st.info("✅ No ECUs are missing — all components appear functional.")
 
 elif uploaded_file:
-    st.warning("⚠️ Please enter a vehicle name to generate and download the report.")
+    st.warning("⚠️ Please enter a vehicle name to generate the report.")
 elif vehicle_name:
-    st.info("📂 Please upload a valid `.trc` file to begin diagnosis.")
+    st.info("📂 Please upload a `.trc` file to begin diagnosis.")
 
 # --- Footer ---
 st.markdown("---")
@@ -269,7 +298,7 @@ st.markdown(
     """
     <div style='text-align: center; font-size: 0.85em; color: gray; line-height: 1.4;'>
         © 2025 Blue Energy Motors. All rights reserved.<br>
-        This diagnostic tool and its associated materials are proprietary and intended for authorized diagnostic and engineering use only. Unauthorized reproduction, distribution, or modification is strictly prohibited.
+        This diagnostic tool and its associated materials are proprietary and intended for authorized diagnostic and engineering use only.
     </div>
     """,
     unsafe_allow_html=True
