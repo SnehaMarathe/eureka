@@ -1,4 +1,3 @@
-# app.py
 import streamlit as st
 import re
 import io
@@ -7,18 +6,14 @@ from datetime import datetime
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
-import os  # <-- Added for visitor counter
+import os
 
 # --- Visitor Counter ---
 def update_visitor_count():
     counter_file = "counter.txt"
-
-    # Create counter file if it doesn't exist
     if not os.path.exists(counter_file):
         with open(counter_file, "w") as f:
             f.write("0")
-
-    # Read, increment, and save the new count only once per session
     if "visitor_counted" not in st.session_state:
         with open(counter_file, "r+") as f:
             count = int(f.read().strip())
@@ -32,7 +27,7 @@ def update_visitor_count():
         with open(counter_file, "r") as f:
             st.session_state["visitor_count"] = int(f.read().strip())
 
-update_visitor_count()  # <-- Call the function
+update_visitor_count()
 
 # --- User Credentials ---
 USER_CREDENTIALS = {
@@ -67,7 +62,7 @@ if not st.session_state["authenticated"]:
     login()
     st.stop()
 
-# --- Header (Logo + Centered Title + Visitor Count) ---
+# --- Header ---
 col1, col2, col3 = st.columns([1, 6, 1])
 
 with col1:
@@ -94,7 +89,7 @@ with col3:
 
 st.markdown("<hr style='margin-top: 0.5rem; margin-bottom: 1rem;'>", unsafe_allow_html=True)
 
-# --- ECU, Fuse, Harness, Connector Map ---
+# --- ECU Map ---
 ecu_connector_map = {
     "Engine ECU": {"connector": "Connector 4", "location": "Front left engine bay near pre-fuse box", "harness": "Front Chassis Wiring Harness", "fuse": "F42"},
     "ABS ECU": {"connector": "Connector 3", "location": "Cabin firewall, near brake switch", "harness": "Cabin Harness Pig Tail", "fuse": "F47"},
@@ -144,7 +139,7 @@ def generate_pdf_buffer(report_data, vehicle_name):
     buffer.seek(0)
     return buffer
 
-# --- Vehicle Config ---
+# --- Vehicle Info ---
 st.markdown("### 🚛 Vehicle Info")
 vehicle_name = st.text_input("Enter Vehicle Name or ID", max_chars=30)
 
@@ -156,7 +151,6 @@ has_retarder = st.checkbox("Has Retarder?", value=True)
 # --- File Upload ---
 uploaded_file = st.file_uploader("📁 Upload your `.trc` file", type=["trc"])
 
-# --- Main Diagnosis ---
 if uploaded_file and vehicle_name.strip():
     content = uploaded_file.read().decode("latin1")
     lines = content.splitlines()
@@ -223,47 +217,36 @@ if uploaded_file and vehicle_name.strip():
         mime="application/pdf"
     )
 
-elif uploaded_file:
-    st.warning("⚠️ Please enter a vehicle name to generate and download the report.")
-elif vehicle_name:
-    st.info("📂 Please upload a valid `.trc` file to begin diagnosis.")
+    # --- Show Relevant Diagnostic Slides ---
+    st.markdown("---")
+    st.markdown("### 🖼️ Diagnostic Visual Reference")
 
+    slide_map = {
+        "Connector 3": [12],
+        "Connector 4": [3],
+        "89E": [5, 6, 7, 8, 9],
+        "Cabin Interface Connector (Brown)": [4],
+        "F47": [6],
+        "F46": [6],
+        "F42": [3],
+        "F43": [3],
+        "F52": [3],
+        "ABS ECU": [12],
+        "Telematics": [4],
+        "Instrument Cluster": [5, 6, 7],
+        "Engine ECU": [3],
+        "Gear Shift Lever": [3],
+        "TCU": [3],
+        "LNG Sensor 1": [3],
+        "LNG Sensor 2": [3],
+        "Retarder Controller": [3],
+    }
 
-# --- Static Images Display Section (Relevant Slides Only) ---
-st.markdown("---")
-st.markdown("### 🖼️ Diagnostic Visual Reference")
-
-slide_map = {
-    "Connector 3": [12],
-    "Connector 4": [3],
-    "89E": [5, 6, 7, 8, 9],
-    "Cabin Interface Connector (Brown)": [4],
-    "F47": [6],
-    "F46": [6],
-    "F42": [3],
-    "F43": [3],
-    "F52": [3],
-    "ABS ECU": [12],
-    "Telematics": [4],
-    "Instrument Cluster": [5, 6, 7],
-    "Engine ECU": [3],
-    "Gear Shift Lever": [3],
-    "TCU": [3],
-    "LNG Sensor 1": [3],
-    "LNG Sensor 2": [3],
-    "Retarder Controller": [3],
-}
-
-if uploaded_file and vehicle_name.strip():
     missing_slides = set()
     for row in report:
         if row["Status"] == "❌ MISSING":
-            ecu = row["ECU"]
-            conn = row["Connector"]
-            fuse = row["Fuse"]
-            for key in [ecu, conn, fuse]:
-                slides = slide_map.get(key, [])
-                missing_slides.update(slides)
+            for key in [row["ECU"], row["Connector"], row["Fuse"]]:
+                missing_slides.update(slide_map.get(key, []))
 
     if missing_slides:
         sorted_slides = sorted(missing_slides)
@@ -275,9 +258,12 @@ if uploaded_file and vehicle_name.strip():
     else:
         st.info("✅ No ECUs are missing — all connectors and fuses appear functional.")
 
-# --- Static Images Display Section (Relevant Slides Only) ---
+elif uploaded_file:
+    st.warning("⚠️ Please enter a vehicle name to generate and download the report.")
+elif vehicle_name:
+    st.info("📂 Please upload a valid `.trc` file to begin diagnosis.")
 
-# --- Footer / Legal Notice ---
+# --- Footer ---
 st.markdown("---")
 st.markdown(
     """
