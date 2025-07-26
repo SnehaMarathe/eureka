@@ -228,32 +228,54 @@ elif uploaded_file:
 elif vehicle_name:
     st.info("📂 Please upload a valid `.trc` file to begin diagnosis.")
 
-# --- Static Images Display Section ---
+
+# --- Static Images Display Section (Relevant Slides Only) ---
 st.markdown("---")
 st.markdown("### 🖼️ Diagnostic Visual Reference")
 
-image_filenames = [
-    "Slide3.PNG", "Slide4.PNG", "Slide5.PNG", "Slide6.PNG", "Slide7.PNG",
-    "Slide8.PNG", "Slide9.PNG", "Slide10.PNG", "Slide11.PNG", "Slide12.PNG",
-    "Slide13.PNG", "Slide14.PNG", "Slide15.PNG"
-]
+slide_map = {
+    "Connector 3": [12],
+    "Connector 4": [3],
+    "89E": [5, 6, 7, 8, 9],
+    "Cabin Interface Connector (Brown)": [4],
+    "F47": [6],
+    "F46": [6],
+    "F42": [3],
+    "F43": [3],
+    "F52": [3],
+    "ABS ECU": [12],
+    "Telematics": [4],
+    "Instrument Cluster": [5, 6, 7],
+    "Engine ECU": [3],
+    "Gear Shift Lever": [3],
+    "TCU": [3],
+    "LNG Sensor 1": [3],
+    "LNG Sensor 2": [3],
+    "Retarder Controller": [3],
+}
 
-image_paths = [f"static_images/{name}" for name in image_filenames]
+if uploaded_file and vehicle_name.strip():
+    missing_slides = set()
+    for row in report:
+        if row["Status"] == "❌ MISSING":
+            ecu = row["ECU"]
+            conn = row["Connector"]
+            fuse = row["Fuse"]
+            for key in [ecu, conn, fuse]:
+                slides = slide_map.get(key, [])
+                missing_slides.update(slides)
 
-page1_images = image_paths[:7]
-page2_images = image_paths[6:]
+    if missing_slides:
+        sorted_slides = sorted(missing_slides)
+        st.success(f"📌 Based on the missing ECUs, the following slide(s) are relevant for debugging: {', '.join(f'Slide {s}' for s in sorted_slides)}")
 
-col1, col2 = st.columns(2)
+        for slide_num in sorted_slides:
+            image_path = f"static_images/Slide{slide_num}.PNG"
+            st.image(image_path, caption=f"Slide {slide_num}", use_container_width=True)
+    else:
+        st.info("✅ No ECUs are missing — all connectors and fuses appear functional.")
 
-with col1:
-    st.markdown("**Page 1**")
-    for img_path in page1_images:
-        st.image(img_path, use_container_width=True)
-
-with col2:
-    st.markdown("**Page 2**")
-    for img_path in page2_images:
-        st.image(img_path, use_container_width=True)
+# --- Static Images Display Section (Relevant Slides Only) ---
 
 # --- Footer / Legal Notice ---
 st.markdown("---")
