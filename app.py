@@ -1,16 +1,16 @@
-#---Final--Working--File--New updates to start now ----#
+#----First Major Mod ------#
 import streamlit as st
+import os
 import re
 import io
 import pandas as pd
 from datetime import datetime
+from collections import defaultdict
 from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
-import os
-from collections import defaultdict
 
-# --- Visitor Counter ---
+# ---------- Visitor Counter ----------
 def update_visitor_count():
     counter_file = "counter.txt"
     if not os.path.exists(counter_file):
@@ -31,7 +31,7 @@ def update_visitor_count():
 
 update_visitor_count()
 
-# --- User Credentials ---
+# ---------- Login ----------
 USER_CREDENTIALS = {
     "admin": "admin123",
     "user": "check2025"
@@ -40,8 +40,8 @@ USER_CREDENTIALS = {
 def login():
     st.markdown("## 🔐 User Login")
     with st.form("login_form"):
-        username = st.text_input("Username", key="username_input")
-        password = st.text_input("Password", type="password", key="password_input")
+        username = st.text_input("Username")
+        password = st.text_input("Password", type="password")
         submitted = st.form_submit_button("🔓 Login")
         if submitted:
             if username in USER_CREDENTIALS and USER_CREDENTIALS[username] == password:
@@ -52,10 +52,9 @@ def login():
             else:
                 st.error("❌ Invalid username or password.")
 
-# --- Streamlit Config ---
+# ---------- Streamlit Config ----------
 st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
 
-# --- Authentication Logic ---
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 
@@ -63,34 +62,7 @@ if not st.session_state["authenticated"]:
     login()
     st.stop()
 
-# --- Header ---
-col1, col2, col3 = st.columns([1, 6, 1])
-
-with col1:
-    st.image("BEM-Logo.png", width=150)
-
-with col2:
-    st.markdown(
-        """
-        <div style='text-align: center;'>
-            <h2 style='margin-bottom: 0;'>🔧 EurekaCheck - CAN Bus Diagnostic Tool</h2>
-            <p style='margin-top: 0; font-size: 1rem;'>
-                Upload a <code>.trc</code> file from PCAN-View to get a full diagnosis of ECU connectivity, harness, fuse, and connector health.
-            </p>
-        </div>
-        """,
-        unsafe_allow_html=True
-    )
-
-with col3:
-    st.markdown(
-        f"<p style='text-align: right; color: gray;'>👥 Visitors: {st.session_state['visitor_count']}</p>",
-        unsafe_allow_html=True
-    )
-
-st.markdown("<hr style='margin-top: 0.5rem; margin-bottom: 1rem;'>", unsafe_allow_html=True)
-
-# --- ECU Info Map ---
+# ---------- ECU & Drawing Maps ----------
 ecu_connector_map = {
     "Engine ECU": {"connector": "Connector 4", "location": "Front left engine bay near pre-fuse box", "harness": "Front Chassis Wiring Harness", "fuse": "F42"},
     "ABS ECU": {"connector": "Connector 3", "location": "Cabin firewall, near brake switch", "harness": "Cabin Harness Pig Tail", "fuse": "F47"},
@@ -103,11 +75,23 @@ ecu_connector_map = {
     "Retarder Controller": {"connector": "Retarder Module Connector", "location": "Chassis, near prop shaft", "harness": "Retarder Wiring", "fuse": "F49"},
 }
 
-# --- CAN ID Utility ---
+drawing_map = {
+    "Connector 3": "PEE0000014_K.pdf",
+    "Connector 4": "PEE0000014_K.pdf",
+    "F46": "PEE0000014_K.pdf",
+    "F47": "PEE0000014_K.pdf",
+    "F42": "PEE0000014_K.pdf",
+    "Cabin Harness": "PEE0000014_K.pdf",
+    "Rear Harness": "PEE0000083_A_01072024.pdf",
+    "Retarder Wiring": "PEE0000013_J_01072024.pdf",
+    "Pig Tail for Double Tank": "PEE0000083_A_01072024.pdf",
+    "Trailer Interface": "PEE0000084.pdf"
+}
+
+# ---------- Utility Functions ----------
 def extract_source_address(can_id):
     return can_id & 0xFF
 
-# --- PDF Generator ---
 def generate_pdf_buffer(report_data, vehicle_name):
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
@@ -137,22 +121,95 @@ def generate_pdf_buffer(report_data, vehicle_name):
     buffer.seek(0)
     return buffer
 
-# --- Vehicle Info ---
-st.markdown("### 🚛 Vehicle Info")
-vehicle_name = st.text_input("Enter Vehicle Name or ID", max_chars=30)
+def infer_root_causes(df, ecu_connector_map):
+    causes = {"Fuse": defaultdict(list), "Connector": defaultdict(list), "Harness": defaultdict(list)}
+    for _, row in df[df["Status"] == "❌ MISSING"].iterrows():
+        causes["Fuse"][row["Fuse"]].append(row["ECU"])
+        causes["Connector"][row["Connector"].strip()].append(row["ECU"])
+        harness = ecu_connector_map.get(row["ECU"], {}).get("harness", "-")
+        causes["Harness"][harness].append(row["ECU"])
+    ranked = []
+    for cause_type, items in causes.items():
+        for item, affected in items.items():
+            total = sum(
+                1 for row in df.itertuples()
+                if (row.Fuse == item if cause_type == "Fuse"
+                    else row.Connector.strip() == item if cause_type == "Connector"
+                    else ecu_connector_map.get(row.ECU, {}).get("harness") == item)
+            )
+            confidence = round(len(affected) / total * 100) if total > 0 else 0
+            ranked.append({
+                "Type": cause_type,
+                "Component": item,
+                "Affected ECUs": affected,
+                "Missing": len(affected),
+                "Total": total,
+                "Confidence": confidence
+            })
+    ranked.sort(key=lambda x: (-x["Confidence"], -x["Missing"]))
+    return ranked
 
-st.markdown("### ⚙️ Vehicle Configuration")
+def generate_detailed_diagnosis(ecu_name, ecu_map, drawing_map):
+    entry = ecu_map.get(ecu_name, {})
+    if not entry:
+        return "No diagnostic mapping available."
+    connector = entry.get("connector", "-")
+    fuse = entry.get("fuse", "-")
+    harness = entry.get("harness", "-")
+    drawing = drawing_map.get(connector) or drawing_map.get(fuse) or drawing_map.get(harness)
+    wire_examples = {
+        "Instrument Cluster": ["14A", "14C", "14K", "53K"],
+        "ABS ECU": ["16A", "16B", "53E", "53F", "53M"],
+        "Telematics": ["13B", "13C", "53E", "53F"],
+        "Engine ECU": ["11A", "11B", "11C", "11G"],
+        "TCU": ["12G", "12F", "51J", "12C"],
+        "Gear Shift Lever": ["12H", "12K", "12L", "12A"],
+        "Retarder Controller": ["51A", "51B", "51C"],
+        "LNG Sensor 1": ["53A", "53B"],
+        "LNG Sensor 2": ["53C", "53D"]
+    }
+    wires = wire_examples.get(ecu_name, ["(refer drawing)"])
+    can_colors = {"CAN_H": "R/G", "CAN_L": "Br/W"}
+    return f"""
+### 🔍 Diagnosis: {ecu_name} Missing
+- ✅ **From diagnostic logic:**
+  - Connector: `{connector}`
+  - Fuse: `{fuse}`
+  - Harness: `{harness}`
+- 🔎 **From Drawing**: `{drawing}`
+  - Trace wires: {', '.join(wires)}
+  - Check CAV Index for pin mapping
+### 🛠️ Suggested Checks:
+1. Verify voltage from **{fuse}** to **{connector}**.
+2. Inspect **CAN lines**: CAN_H (`{can_colors['CAN_H']}`), CAN_L (`{can_colors['CAN_L']}`).
+3. Visually inspect connector `{connector}` for damage.
+4. Check continuity in harness `{harness}` at bend and junction points.
+"""
+
+def show_detailed_diagnostics(df, ecu_map):
+    st.subheader("🔧 Detailed ECU Diagnostic Breakdown")
+    for _, row in df[df["Status"] == "❌ MISSING"].iterrows():
+        diag = generate_detailed_diagnosis(row["ECU"], ecu_map, drawing_map)
+        st.markdown(diag, unsafe_allow_html=True)
+
+# ---------- UI ----------
+col1, col2, col3 = st.columns([1, 6, 1])
+with col1: st.image("BEM-Logo.png", width=150)
+with col2:
+    st.markdown("<h2 style='text-align:center;'>🔧 EurekaCheck - CAN Bus Diagnostic Tool</h2><p style='text-align:center;'>Upload a <code>.trc</code> file from PCAN-View to get a full diagnosis.</p>", unsafe_allow_html=True)
+with col3:
+    st.markdown(f"<p style='text-align: right; color: gray;'>👥 Visitors: {st.session_state['visitor_count']}</p>", unsafe_allow_html=True)
+st.markdown("<hr>", unsafe_allow_html=True)
+
+vehicle_name = st.text_input("🚛 Enter Vehicle Name or ID", max_chars=30)
 has_double_tank = st.checkbox("Has Double Tank?", value=True)
 has_amt = st.checkbox("Has AMT?", value=True)
 has_retarder = st.checkbox("Has Retarder?", value=True)
-
-# --- File Upload ---
 uploaded_file = st.file_uploader("📁 Upload your `.trc` file", type=["trc"])
 
 if uploaded_file and vehicle_name.strip():
     content = uploaded_file.read().decode("latin1")
     lines = content.splitlines()
-
     found_sources = set()
     for line in lines:
         match = re.match(r'\s*\d+\)\s+([\d.]+)\s+Rx\s+([0-9A-Fa-f]{6,8})', line)
@@ -160,110 +217,48 @@ if uploaded_file and vehicle_name.strip():
             can_id = int(match.group(2), 16)
             src_addr = extract_source_address(can_id)
             found_sources.add(src_addr)
-
     ecu_map = {
-        0x17: "Instrument Cluster",
-        0x0B: "ABS ECU",
-        0xEE: "Telematics",
-        0x00: "Engine ECU",
-        0x4E: "LNG Sensor 1",
-        0x4F: "LNG Sensor 2",
-        0x05: "Gear Shift Lever",
-        0x03: "TCU",
-        0x10: "Retarder Controller",
+        0x17: "Instrument Cluster", 0x0B: "ABS ECU", 0xEE: "Telematics",
+        0x00: "Engine ECU", 0x4E: "LNG Sensor 1", 0x4F: "LNG Sensor 2",
+        0x05: "Gear Shift Lever", 0x03: "TCU", 0x10: "Retarder Controller"
     }
-
     report = []
     for addr, ecu in ecu_map.items():
-        if ecu == "LNG Sensor 2" and not has_double_tank:
-            continue
-        if ecu in ["TCU", "Gear Shift Lever"] and not has_amt:
-            continue
-        if ecu == "Retarder Controller" and not has_retarder:
-            continue
+        if ecu == "LNG Sensor 2" and not has_double_tank: continue
+        if ecu in ["TCU", "Gear Shift Lever"] and not has_amt: continue
+        if ecu == "Retarder Controller" and not has_retarder: continue
         status = "✅ OK" if addr in found_sources else "❌ MISSING"
         conn = ecu_connector_map.get(ecu, {})
         report.append({
-            "ECU": ecu,
-            "Source Address": f"0x{addr:02X}",
-            "Status": status,
+            "ECU": ecu, "Source Address": f"0x{addr:02X}", "Status": status,
             "Connector": conn.get("connector", "-"),
             "Location": conn.get("location", "-"),
             "Fuse": conn.get("fuse", "-")
         })
-
     df = pd.DataFrame(report)
-
-    # --- Intelligent Diagnosis ---
-    def infer_root_causes(df):
-        causes = {"Fuse": defaultdict(list), "Connector": defaultdict(list), "Harness": defaultdict(list)}
-        for _, row in df[df["Status"] == "❌ MISSING"].iterrows():
-            causes["Fuse"][row["Fuse"]].append(row["ECU"])
-            causes["Connector"][row["Connector"]].append(row["ECU"])
-            harness = ecu_connector_map.get(row["ECU"], {}).get("harness", "-")
-            causes["Harness"][harness].append(row["ECU"])
-        ranked_causes = []
-        for cause_type, items in causes.items():
-            for item, affected_ecus in items.items():
-                total = sum(
-                    1 for row in df.itertuples()
-                    if (row.Fuse == item if cause_type == "Fuse"
-                        else row.Connector == item if cause_type == "Connector"
-                        else ecu_connector_map.get(row.ECU, {}).get("harness") == item)
-                )
-                score = len(affected_ecus) / total if total > 0 else 0
-                ranked_causes.append({
-                    "Type": cause_type,
-                    "Component": item,
-                    "Affected ECUs": affected_ecus,
-                    "Missing": len(affected_ecus),
-                    "Total": total,
-                    "Confidence": round(score * 100)
-                })
-        ranked_causes.sort(key=lambda x: (-x["Confidence"], -x["Missing"]))
-        return ranked_causes
-
-    root_cause_results = infer_root_causes(df)
-
+    root_causes = infer_root_causes(df, ecu_connector_map)
     st.success("✅ Diagnostics completed successfully!")
-    st.subheader("📋 ECU Status Report")
     st.dataframe(df, use_container_width=True)
-
     st.subheader("🧠 Inferred Root Causes")
-    if root_cause_results:
-        for cause in root_cause_results:
-            st.markdown(
-                f"""
+    if root_causes:
+        for cause in root_causes:
+            st.markdown(f"""
                 <div style='border:1px solid #ddd; border-radius:10px; padding:10px; margin-bottom:10px; background:#fffbe6'>
                     <strong>Type:</strong> {cause["Type"]} &nbsp;&nbsp;
                     <strong>Component:</strong> <code>{cause["Component"]}</code><br>
                     <strong>Affected ECUs:</strong> {", ".join(cause["Affected ECUs"])}<br>
                     <strong>Missing:</strong> {cause["Missing"]} / {cause["Total"]} ({cause["Confidence"]}% confidence)
                 </div>
-                """,
-                unsafe_allow_html=True
-            )
+            """, unsafe_allow_html=True)
     else:
-        st.info("✅ No root causes inferred. All components appear functional.")
-
+        st.info("✅ All components appear functional.")
     with st.expander("🔍 Show only MISSING ECUs"):
         st.table(df[df["Status"].str.contains("MISSING")])
-
-    st.subheader("🛠️ Connector-Level Diagnosis")
-    conn_counts = df[df["Status"] == "❌ MISSING"].groupby("Connector")["ECU"].count()
-    for conn, count in conn_counts.items():
-        if count >= 2:
-            st.error(f"❌ Multiple ECUs missing on {conn} — check connector at {ecu_connector_map.get(df[df['Connector'] == conn]['ECU'].iloc[0], {}).get('location', '-')}")
-
+    show_detailed_diagnostics(df, ecu_connector_map)
     pdf_buffer = generate_pdf_buffer(report, vehicle_name)
-    st.download_button(
-        label="⬇️ Download PDF Report",
-        data=pdf_buffer,
-        file_name=f"{datetime.now().strftime('%Y-%m-%d_%H%M')}_{vehicle_name.replace(' ', '_')}.pdf",
-        mime="application/pdf"
-    )
+    st.download_button("⬇️ Download PDF Report", data=pdf_buffer, file_name=f"{datetime.now().strftime('%Y-%m-%d_%H%M')}_{vehicle_name.replace(' ', '_')}.pdf", mime="application/pdf")
 
-    # --- Show Relevant Diagnostic Slides ---
+        # --- Show Relevant Diagnostic Slides ---
     st.markdown("---")
     st.markdown("### 🖼️ Diagnostic Visual Reference")
 
@@ -288,19 +283,8 @@ if uploaded_file and vehicle_name.strip():
     else:
         st.info("✅ No ECUs are missing — all components appear functional.")
 
-elif uploaded_file:
-    st.warning("⚠️ Please enter a vehicle name to generate the report.")
-elif vehicle_name:
-    st.info("📂 Please upload a `.trc` file to begin diagnosis.")
+else:
+    st.info("ℹ️ Upload a `.trc` file and provide a vehicle name to begin diagnostics.")
 
-# --- Footer ---
 st.markdown("---")
-st.markdown(
-    """
-    <div style='text-align: center; font-size: 0.85em; color: gray; line-height: 1.4;'>
-        © 2025 Blue Energy Motors. All rights reserved.<br>
-        This diagnostic tool and its associated materials are proprietary and intended for authorized diagnostic and engineering use only.
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+st.markdown("<div style='text-align:center; font-size:0.85em; color:gray;'>© 2025 Blue Energy Motors. All rights reserved.</div>", unsafe_allow_html=True)
