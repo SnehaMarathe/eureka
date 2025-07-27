@@ -276,52 +276,51 @@ if uploaded_file and vehicle_name.strip():
     for _, row in df[df["Status"] == "❌ MISSING"].iterrows():
         st.markdown(generate_detailed_diagnosis(row["ECU"]), unsafe_allow_html=True)
 
+        # --- Show Relevant Diagnostic Slides ---
+    st.markdown("---")
+    st.markdown("### 🖼️ Diagnostic Visual Reference")
+    
+    # Map ECUs, connectors, and fuses to slide numbers
+    slide_map = {
+        "Connector 3": [12],
+        "Connector 4": [3],
+        "89E": [5, 6, 7, 8, 9],
+        "Cabin Interface Connector (Brown)": [4],
+        "F47": [6],
+        "F46": [6],
+        "F42": [3],
+        "F43": [3],
+        "F52": [3],
+        "ABS ECU": [12],
+        "Telematics": [4],
+        "Instrument Cluster": [5, 6, 7],
+        "Engine ECU": [3],
+        "Gear Shift Lever": [3],
+        "TCU": [3],
+        "LNG Sensor 1": [3],
+        "LNG Sensor 2": [3],
+        "Retarder Controller": [3]
+    }
+    
+    # Collect unique relevant slides based on missing ECUs
+    missing_slides = set()
+    for row in report:
+        if row["Status"] == "❌ MISSING":
+            for key in [row["ECU"], row["Connector"], row["Fuse"]]:
+                missing_slides.update(slide_map.get(key, []))
+    
+    # Display slides
+    if missing_slides:
+        st.success(f"📌 Relevant slides for missing ECUs: {', '.join(f'Slide {s}' for s in sorted(missing_slides))}")
+        for slide_num in sorted(missing_slides):
+            st.image(f"static_images/Slide{slide_num}.PNG", caption=f"Slide {slide_num}", use_container_width=True)
+    else:
+        st.info("✅ No ECUs are missing — all components appear functional.")
+
 elif uploaded_file:
     st.warning("⚠️ Please enter a vehicle name.")
 elif vehicle_name:
     st.info("📂 Please upload a `.trc` file.")
-
-# --- Show Relevant Diagnostic Slides ---
-st.markdown("---")
-st.markdown("### 🖼️ Diagnostic Visual Reference")
-
-# Map ECUs, connectors, and fuses to slide numbers
-slide_map = {
-    "Connector 3": [12],
-    "Connector 4": [3],
-    "89E": [5, 6, 7, 8, 9],
-    "Cabin Interface Connector (Brown)": [4],
-    "F47": [6],
-    "F46": [6],
-    "F42": [3],
-    "F43": [3],
-    "F52": [3],
-    "ABS ECU": [12],
-    "Telematics": [4],
-    "Instrument Cluster": [5, 6, 7],
-    "Engine ECU": [3],
-    "Gear Shift Lever": [3],
-    "TCU": [3],
-    "LNG Sensor 1": [3],
-    "LNG Sensor 2": [3],
-    "Retarder Controller": [3]
-}
-
-# Collect unique relevant slides based on missing ECUs
-missing_slides = set()
-for row in report:
-    if row["Status"] == "❌ MISSING":
-        for key in [row["ECU"], row["Connector"], row["Fuse"]]:
-            missing_slides.update(slide_map.get(key, []))
-
-# Display slides
-if missing_slides:
-    st.success(f"📌 Relevant slides for missing ECUs: {', '.join(f'Slide {s}' for s in sorted(missing_slides))}")
-    for slide_num in sorted(missing_slides):
-        st.image(f"static_images/Slide{slide_num}.PNG", caption=f"Slide {slide_num}", use_container_width=True)
-else:
-    st.info("✅ No ECUs are missing — all components appear functional.")
-
 
 # --- Footer ---
 st.markdown("---")
