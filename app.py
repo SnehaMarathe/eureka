@@ -327,8 +327,9 @@ st.markdown("---")
 st.markdown(
     """
     <div style='text-align: center; font-size: 0.85em; color: gray;'>
-        © 2025 Blue Energy Motors. All rights reserved.<br>
-        For authorized diagnostic use only.
+        © 2025 Blue Energy Motors.<br>
+        All rights reserved.<br>
+        This diagnostic tool and its associated materials are proprietary and intended for authorized diagnostic and engineering use only.
     </div>
     """,
     unsafe_allow_html=True
