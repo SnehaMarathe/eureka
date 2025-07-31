@@ -1,4 +1,4 @@
-# Phase 2-2
+# Phase 2 - 1
 import streamlit as st
 import re
 import io
@@ -9,7 +9,6 @@ from reportlab.pdfgen import canvas
 from reportlab.lib import colors
 from collections import defaultdict
 import os
-import can  # ← PCAN support
 
 # --- Streamlit Config ---
 st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
@@ -63,26 +62,6 @@ if not st.session_state["authenticated"]:
     login()
     st.stop()
 
-# --- PCAN Detection Functions ---
-def is_pcan_connected():
-    try:
-        bus = can.interface.Bus(bustype='pcan', channel='PCAN_USBBUS1', bitrate=500000)
-        bus.shutdown()
-        return True
-    except can.CanError:
-        return False
-
-def read_pcan_messages(duration=10):
-    bus = can.interface.Bus(bustype='pcan', channel='PCAN_USBBUS1', bitrate=500000)
-    start_time = datetime.now()
-    found_sources = set()
-    while (datetime.now() - start_time).total_seconds() < duration:
-        msg = bus.recv(timeout=1)
-        if msg:
-            found_sources.add(msg.arbitration_id & 0xFF)
-    bus.shutdown()
-    return found_sources
-
 # --- Header ---
 col1, col2, col3 = st.columns([1, 6, 1])
 with col1:
@@ -92,7 +71,7 @@ with col2:
         """
         <div style='text-align: center;'>
             <h2 style='margin-bottom: 0;'>🔧 EurekaCheck - CAN Bus Diagnostic Tool</h2>
-            <p style='margin-top: 0;'>Connect to PCAN or Upload a <code>.trc</code> file or connect PCAN to analyze ECU health.</p>
+            <p style='margin-top: 0;'>Upload a <code>.trc</code> file to analyze ECU health.</p>
         </div>
         """,
         unsafe_allow_html=True
@@ -104,7 +83,7 @@ with col3:
     )
 st.markdown("<hr style='margin-top: 0.5rem;'>", unsafe_allow_html=True)
 
-# --- ECU Maps ---
+# --- ECU & Drawing Maps ---
 ecu_connector_map = {
     "Engine ECU": {"connector": "Connector 4", "location": "Front left engine bay near pre-fuse box", "harness": "Front Chassis Wiring Harness", "fuse": "F42"},
     "ABS ECU": {"connector": "Connector 3", "location": "Cabin firewall, near brake switch", "harness": "Cabin Harness Pig Tail", "fuse": "F47"},
@@ -131,7 +110,8 @@ drawing_map = {
 }
 
 # --- Utility Functions ---
-def extract_source_address(can_id): return can_id & 0xFF
+def extract_source_address(can_id):
+    return can_id & 0xFF
 
 def generate_pdf_buffer(report_data, vehicle_name):
     buffer = io.BytesIO()
@@ -228,7 +208,7 @@ def generate_detailed_diagnosis(ecu_name):
 4. Inspect harness `{harness}` bends and joints for breaks.
 """
 
-# --- Inputs ---
+# --- User Inputs ---
 st.markdown("### 🚛 Vehicle Info")
 vehicle_name = st.text_input("Enter Vehicle Name or ID", max_chars=30)
 
@@ -237,23 +217,16 @@ has_double_tank = st.checkbox("Has Double Tank?", value=True)
 has_amt = st.checkbox("Has AMT?", value=True)
 has_retarder = st.checkbox("Has Retarder?", value=True)
 
-found_sources = set()
+uploaded_file = st.file_uploader("📁 Upload `.trc` File", type=["trc"])
 
-# --- Auto-Detect Source ---
-if is_pcan_connected():
-    st.success("🔌 PCAN device detected. Reading live CAN data...")
-    found_sources = read_pcan_messages(duration=10)
-else:
-    uploaded_file = st.file_uploader("📁 Upload `.trc` File", type=["trc"])
-    if uploaded_file:
-        lines = uploaded_file.read().decode("latin1").splitlines()
-        found_sources = {
-            extract_source_address(int(re.match(r'\s*\d+\)\s+[\d.]+\s+Rx\s+([0-9A-Fa-f]{6,8})', line).group(1), 16))
-            for line in lines if re.match(r'\s*\d+\)\s+[\d.]+\s+Rx\s+([0-9A-Fa-f]{6,8})', line)
-        }
+# --- Process File ---
+if uploaded_file and vehicle_name.strip():
+    lines = uploaded_file.read().decode("latin1").splitlines()
+    found_sources = {
+        extract_source_address(int(re.match(r'\s*\d+\)\s+[\d.]+\s+Rx\s+([0-9A-Fa-f]{6,8})', line).group(1), 16))
+        for line in lines if re.match(r'\s*\d+\)\s+[\d.]+\s+Rx\s+([0-9A-Fa-f]{6,8})', line)
+    }
 
-# --- Diagnostics ---
-if found_sources and vehicle_name.strip():
     ecu_map = {
         0x17: "Instrument Cluster",
         0x0B: "ABS ECU",
@@ -283,6 +256,7 @@ if found_sources and vehicle_name.strip():
         })
 
     df = pd.DataFrame(report)
+
     st.success("✅ Diagnostics completed!")
     st.subheader("📋 ECU Status")
     st.dataframe(df, use_container_width=True)
@@ -302,10 +276,51 @@ if found_sources and vehicle_name.strip():
     for _, row in df[df["Status"] == "❌ MISSING"].iterrows():
         st.markdown(generate_detailed_diagnosis(row["ECU"]), unsafe_allow_html=True)
 
-elif not found_sources:
-    st.warning("⚠️ No PCAN detected and no file uploaded.")
-elif vehicle_name.strip() == "":
+        # --- Show Relevant Diagnostic Slides ---
+    st.markdown("---")
+    st.markdown("### 🖼️ Diagnostic Visual Reference")
+    
+    # Map ECUs, connectors, and fuses to slide numbers
+    slide_map = {
+        "Connector 3": [12],
+        "Connector 4": [3],
+        "89E": [5, 6, 7, 8, 9],
+        "Cabin Interface Connector (Brown)": [4],
+        "F47": [6],
+        "F46": [6],
+        "F42": [3],
+        "F43": [3],
+        "F52": [3],
+        "ABS ECU": [12],
+        "Telematics": [4],
+        "Instrument Cluster": [5, 6, 7],
+        "Engine ECU": [3],
+        "Gear Shift Lever": [3],
+        "TCU": [3],
+        "LNG Sensor 1": [3],
+        "LNG Sensor 2": [3],
+        "Retarder Controller": [3]
+    }
+    
+    # Collect unique relevant slides based on missing ECUs
+    missing_slides = set()
+    for row in report:
+        if row["Status"] == "❌ MISSING":
+            for key in [row["ECU"], row["Connector"], row["Fuse"]]:
+                missing_slides.update(slide_map.get(key, []))
+    
+    # Display slides
+    if missing_slides:
+        st.success(f"📌 Relevant slides for missing ECUs: {', '.join(f'Slide {s}' for s in sorted(missing_slides))}")
+        for slide_num in sorted(missing_slides):
+            st.image(f"static_images/Slide{slide_num}.PNG", caption=f"Slide {slide_num}", use_container_width=True)
+    else:
+        st.info("✅ No ECUs are missing — all components appear functional.")
+
+elif uploaded_file:
     st.warning("⚠️ Please enter a vehicle name.")
+elif vehicle_name:
+    st.info("📂 Please upload a `.trc` file.")
 
 # --- Footer ---
 st.markdown("---")
