@@ -1,4 +1,4 @@
-# Phase 2 - 1
+# Phase 2 - 2 (with Live PCAN Support)
 import streamlit as st
 import re
 import io
@@ -9,6 +9,13 @@ from reportlab.pdfgen import canvas
 from reportlab.lib import colors
 from collections import defaultdict
 import os
+
+# Try importing python-can for live CAN support
+try:
+    import can
+    PCAN_AVAILABLE = True
+except ImportError:
+    PCAN_AVAILABLE = False
 
 # --- Streamlit Config ---
 st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
@@ -71,7 +78,7 @@ with col2:
         """
         <div style='text-align: center;'>
             <h2 style='margin-bottom: 0;'>🔧 EurekaCheck - CAN Bus Diagnostic Tool</h2>
-            <p style='margin-top: 0;'>Upload a <code>.trc</code> file to analyze ECU health.</p>
+            <p style='margin-top: 0;'>Upload a <code>.trc</code> file or read live PCAN to analyze ECU health.</p>
         </div>
         """,
         unsafe_allow_html=True
@@ -217,15 +224,52 @@ has_double_tank = st.checkbox("Has Double Tank?", value=True)
 has_amt = st.checkbox("Has AMT?", value=True)
 has_retarder = st.checkbox("Has Retarder?", value=True)
 
-uploaded_file = st.file_uploader("📁 Upload `.trc` File", type=["trc"])
+# Input mode selection
+input_mode = st.radio("Select Input Mode", (
+    "Upload File",
+    "Live PCAN" if PCAN_AVAILABLE else "Upload File Only"
+))
 
-# --- Process File ---
-if uploaded_file and vehicle_name.strip():
-    lines = uploaded_file.read().decode("latin1").splitlines()
-    found_sources = {
-        extract_source_address(int(re.match(r'\s*\d+\)\s+[\d.]+\s+Rx\s+([0-9A-Fa-f]{6,8})', line).group(1), 16))
-        for line in lines if re.match(r'\s*\d+\)\s+[\d.]+\s+Rx\s+([0-9A-Fa-f]{6,8})', line)
-    }
+# --- Live PCAN Mode ---
+live_messages = []
+if input_mode == "Live PCAN" and PCAN_AVAILABLE:
+    with st.form("live_pcan_form"):
+        st.write("### 🔌 Connect to PCAN")
+        channel = st.text_input("PCAN Channel (e.g., PCAN_USBBUS1)", "PCAN_USBBUS1")
+        bitrate = st.selectbox("Bitrate", ["500000", "250000", "125000"], index=0)
+        duration = st.slider("Capture Duration (seconds)", 1, 30, 5)
+        submitted = st.form_submit_button("▶️ Start Live Diagnostics")
+
+        if submitted:
+            st.info(f"Connecting to {channel} @ {bitrate} bps...")
+            try:
+                bus = can.interface.Bus(channel=channel, bustype='pcan', bitrate=int(bitrate))
+                st.success("Connected. Reading messages...")
+                start_time = datetime.now()
+                with st.spinner("Capturing messages..."):
+                    while (datetime.now() - start_time).seconds < duration:
+                        msg = bus.recv(timeout=0.2)
+                        if msg:
+                            live_messages.append(msg)
+                bus.shutdown()
+                st.success(f"✅ Captured {len(live_messages)} messages.")
+            except Exception as e:
+                st.error(f"❌ PCAN connection failed: {e}")
+
+# --- Process Uploaded File or Live Messages ---
+uploaded_file = None
+if input_mode.startswith("Upload"):
+    uploaded_file = st.file_uploader("📁 Upload `.trc` File", type=["trc"])
+
+if (uploaded_file or live_messages) and vehicle_name.strip():
+    if uploaded_file:
+        lines = uploaded_file.read().decode("latin1").splitlines()
+        found_sources = {
+            extract_source_address(int(re.match(r'\s*\d+\)\s+[\d.]+\s+Rx\s+([0-9A-Fa-f]{6,8})', line).group(1), 16))
+            for line in lines if re.match(r'\s*\d+\)\s+[\d.]+\s+Rx\s+([0-9A-Fa-f]{6,8})', line)
+        }
+    else:
+        found_sources = {extract_source_address(msg.arbitration_id) for msg in live_messages}
 
     ecu_map = {
         0x17: "Instrument Cluster",
@@ -275,6 +319,7 @@ if uploaded_file and vehicle_name.strip():
     st.subheader("🔧 Detailed ECU Diagnostics")
     for _, row in df[df["Status"] == "❌ MISSING"].iterrows():
         st.markdown(generate_detailed_diagnosis(row["ECU"]), unsafe_allow_html=True)
+
 
         # --- Show Relevant Diagnostic Slides ---
     st.markdown("---")
