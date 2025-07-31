@@ -3,3 +3,4 @@ requests
 pandas
 streamlit-autorefresh
 reportlab
+python-can==4.3.1
