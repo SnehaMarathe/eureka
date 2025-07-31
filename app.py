@@ -78,7 +78,7 @@ with col2:
         """
         <div style='text-align: center;'>
             <h2 style='margin-bottom: 0;'>🔧 EurekaCheck - CAN Bus Diagnostic Tool</h2>
-            <p style='margin-top: 0;'>Upload a <code>.trc</code> file or read live PCAN to analyze ECU health.</p>
+            <p style='margin-top: 0;'>Connect PCAN or Upload a <code>.trc</code> file or read live PCAN to analyze ECU health.</p>
         </div>
         """,
         unsafe_allow_html=True
