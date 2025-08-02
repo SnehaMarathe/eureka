@@ -367,6 +367,61 @@ elif uploaded_file:
 elif vehicle_name:
     st.info("📂 Please upload a `.trc` file.")
 
+# ---2/8/2025---Adding Firebase 
+
+import firebase_admin
+from firebase_admin import credentials, firestore
+import requests
+
+import streamlit as st
+import firebase_admin
+from firebase_admin import credentials
+
+# Load secrets
+firebase_config = st.secrets["FIREBASE"]
+
+cred = credentials.Certificate({
+    "type": firebase_config["type"],
+    "project_id": firebase_config["project_id"],
+    "private_key_id": firebase_config["private_key_id"],
+    "private_key": firebase_config["private_key"].replace("\\n", "\n"),
+    "client_email": firebase_config["client_email"],
+    "client_id": firebase_config["client_id"],
+    "auth_uri": firebase_config["auth_uri"],
+    "token_uri": firebase_config["token_uri"],
+    "auth_provider_x509_cert_url": firebase_config["auth_provider_x509_cert_url"],
+    "client_x509_cert_url": firebase_config["client_x509_cert_url"],
+    "universe_domain": firebase_config["universe_domain"]
+})
+
+# Initialize Firebase Admin
+if not firebase_admin._apps:
+    firebase_admin.initialize_app(cred)
+
+db = firestore.client()
+
+# --- Get User IP ---
+def get_user_ip():
+    try:
+        response = requests.get("https://api.ipify.org?format=json", timeout=5)
+        return response.json().get("ip", "Unknown")
+    except:
+        return "Unknown"
+
+# --- Log Diagnostic Result to Firebase ---
+def log_to_firebase(vehicle_name, result_df):
+    user_ip = get_user_ip()
+    data = {
+        "username": st.session_state.get("username", "guest"),
+        "vehicle_name": vehicle_name,
+        "ip": user_ip,
+        "timestamp": datetime.now().isoformat(),
+        "results": result_df.to_dict(orient="records")
+    }
+    db.collection("diagnostics_logs").add(data)
+    st.success("📡 Data successfully saved to Firebase.")
+
+
 # --- Footer ---
 st.markdown("---")
 st.markdown(
@@ -379,3 +434,4 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
