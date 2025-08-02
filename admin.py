@@ -83,24 +83,37 @@ if not logs:
     st.stop()
 
 # =============================
-# Display Logs
+# Display Logs (Record-Level)
 # =============================
 df_list = []
+
 for log in logs:
-    records_df = pd.DataFrame(log["records"])
-    records_df["vehicle"] = log.get("vehicle", "N/A")
-    records_df["timestamp"] = log.get("timestamp", "N/A")  # ✅ Correctly assign
-    user_info = log.get("user_info", {})
-    records_df["ip"] = user_info.get("ip", "")
-    records_df["city"] = user_info.get("city", "")
-    records_df["region"] = user_info.get("region", "")
-    records_df["country"] = user_info.get("country", "")
-    df_list.append(records_df)
+    # Create DataFrame for each record in "records"
+    for record in log.get("records", []):
+        row = {
+            "vehicle": log.get("vehicle", "N/A"),
+            "timestamp": log.get("timestamp", "N/A"),
+            "ip": log.get("user_info", {}).get("ip", ""),
+            "city": log.get("user_info", {}).get("city", ""),
+            "region": log.get("user_info", {}).get("region", ""),
+            "country": log.get("user_info", {}).get("country", "")
+        }
+        # Merge record fields with meta info
+        row.update(record)
+        df_list.append(row)
 
-full_df = pd.concat(df_list, ignore_index=True)
+# Combine all rows
+full_df = pd.DataFrame(df_list)
 
-# Convert only valid timestamps
+# Convert timestamps safely
 full_df["timestamp"] = pd.to_datetime(full_df["timestamp"], errors='coerce')
+
+# Sort newest first
+full_df = full_df.sort_values(by="timestamp", ascending=False).reset_index(drop=True)
+
+# Display in Streamlit
+st.dataframe(full_df)
+
 
 
 # Search & Filters
