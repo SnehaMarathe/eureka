@@ -60,11 +60,11 @@ def log_to_firebase(vehicle_name, df):
 # =============================
 # ✅ Firestore Write Test
 # =============================
-try:
-    db.collection("test").add({"msg": "hello"})
-    st.success("Firestore write successful ✅")
-except Exception as e:
-    st.error(f"Firestore write failed ❌: {e}")
+# try:
+#    db.collection("test").add({"msg": "hello"})
+#    st.success("Firestore write successful ✅")
+# except Exception as e:
+#    st.error(f"Firestore write failed ❌: {e}")
 
 # =============================
 
@@ -441,6 +441,7 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
 
 
