@@ -88,8 +88,8 @@ if not logs:
 df_list = []
 for log in logs:
     records_df = pd.DataFrame(log["records"])
-    records_df["vehicle"] = log["vehicle"]
-    records_df["timestamp"] = log["timestamp"]
+    records_df["vehicle"] = log.get("vehicle", "N/A")
+    records_df["timestamp"] = log.get("timestamp", "N/A")  # ✅ Correctly assign
     user_info = log.get("user_info", {})
     records_df["ip"] = user_info.get("ip", "")
     records_df["city"] = user_info.get("city", "")
@@ -98,7 +98,10 @@ for log in logs:
     df_list.append(records_df)
 
 full_df = pd.concat(df_list, ignore_index=True)
-full_df["timestamp"] = pd.to_datetime(full_df["timestamp"])
+
+# Convert only valid timestamps
+full_df["timestamp"] = pd.to_datetime(full_df["timestamp"], errors='coerce')
+
 
 # Search & Filters
 st.sidebar.header("🔎 Filters")
