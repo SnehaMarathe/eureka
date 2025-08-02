@@ -16,6 +16,36 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import requests
 
+def get_user_ip_and_location():
+    try:
+        # Get public IP
+        ip_response = requests.get("https://api64.ipify.org?format=json", timeout=5)
+        ip = ip_response.json().get("ip", "Unknown")
+
+        # Get location using IP
+        location_response = requests.get(f"https://ipapi.co/{ip}/json/", timeout=5)
+        location_data = location_response.json()
+
+        return {
+            "ip": ip,
+            "city": location_data.get("city", "Unknown"),
+            "region": location_data.get("region", "Unknown"),
+            "country": location_data.get("country_name", "Unknown"),
+            "latitude": location_data.get("latitude", None),
+            "longitude": location_data.get("longitude", None)
+        }
+    except Exception as e:
+        return {
+            "ip": "Error",
+            "city": "Error",
+            "region": "Error",
+            "country": "Error",
+            "latitude": None,
+            "longitude": None,
+            "error": str(e)
+        }
+
+
 # =============================
 # 🔑 Initialize Firebase
 # =============================
@@ -43,7 +73,6 @@ def init_firebase():
         firebase_admin.initialize_app(cred)
 
     return firestore.client()
-    # db = firestore.client(database="euraka99")  # 👈 specify your DB name
 
 db = init_firebase()
 
@@ -53,7 +82,9 @@ db = init_firebase()
 def log_to_firebase(vehicle_name, df):
     data = {
         "vehicle": vehicle_name,
-        "records": df.to_dict(orient="records")
+        "records": df.to_dict(orient="records"),
+        "user_info": user_info,
+        "timestamp": datetime.now().isoformat()
     }
     db.collection("diagnostics_logs").add(data)
 
@@ -103,6 +134,8 @@ if "visitor_counted" not in st.session_state:
     st.session_state["visitor_counted"] = True
 
 # =============================
+# ✅ # Increment counter in Firestore
+# =============================
 
 # Try importing python-can for live CAN support
 try:
@@ -114,10 +147,6 @@ except ImportError:
 # --- Streamlit Config ---
 st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
 
-
-# =============================
-# ✅ # Increment counter in Firestore
-# =============================
 
 # --- User Credentials ---
 USER_CREDENTIALS = {
@@ -461,6 +490,7 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
 
 
