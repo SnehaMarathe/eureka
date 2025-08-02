@@ -89,7 +89,7 @@ def log_to_firebase(vehicle_name, df):
         "user_info": user_info,
         "timestamp": datetime.now().isoformat()
     }
-
+    db.collection("diagnostics_logs").add(data)
 # =============================
 # ✅ Firestore Write Test
 # =============================
@@ -496,6 +496,7 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
 
 
