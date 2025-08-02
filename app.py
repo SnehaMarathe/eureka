@@ -9,12 +9,12 @@ from reportlab.pdfgen import canvas
 from reportlab.lib import colors
 from collections import defaultdict
 import os
+import threading
 # ---2/8/2025---Adding Firebase 
 
 import firebase_admin
 from firebase_admin import credentials, firestore
 import requests
-
 
 # =============================
 # 🔑 Initialize Firebase
@@ -67,6 +67,42 @@ def log_to_firebase(vehicle_name, df):
 #    st.error(f"Firestore write failed ❌: {e}")
 
 # =============================
+# ✅ # Increment counter in Firestore
+# =============================
+
+def update_visitor_count_firestore():
+    counter_ref = db.collection("visitors").document("counter")
+    counter_doc = counter_ref.get()
+
+    if not counter_doc.exists:
+        counter_ref.set({"count": 1})
+        count = 1
+    else:
+        count = counter_doc.to_dict().get("count", 0) + 1
+        counter_ref.update({"count": count})
+
+    st.session_state["visitor_count"] = count
+
+# --- Listen for real-time updates ---
+def visitor_listener():
+    counter_ref = db.collection("visitors").document("counter")
+    def on_snapshot(doc_snapshot, changes, read_time):
+        for doc in doc_snapshot:
+            count = doc.to_dict().get("count", 0)
+            st.session_state["visitor_count"] = count
+    counter_ref.on_snapshot(on_snapshot)
+
+# --- Start listener only once ---
+if "listener_started" not in st.session_state:
+    threading.Thread(target=visitor_listener, daemon=True).start()
+    st.session_state["listener_started"] = True
+
+# --- Increment only once per session ---
+if "visitor_counted" not in st.session_state:
+    update_visitor_count_firestore()
+    st.session_state["visitor_counted"] = True
+
+# =============================
 
 # Try importing python-can for live CAN support
 try:
@@ -78,26 +114,10 @@ except ImportError:
 # --- Streamlit Config ---
 st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
 
-# --- Visitor Counter ---
-def update_visitor_count():
-    counter_file = "counter.txt"
-    if not os.path.exists(counter_file):
-        with open(counter_file, "w") as f:
-            f.write("0")
-    if "visitor_counted" not in st.session_state:
-        with open(counter_file, "r+") as f:
-            count = int(f.read().strip())
-            count += 1
-            f.seek(0)
-            f.write(str(count))
-            f.truncate()
-        st.session_state["visitor_counted"] = True
-        st.session_state["visitor_count"] = count
-    else:
-        with open(counter_file, "r") as f:
-            st.session_state["visitor_count"] = int(f.read().strip())
 
-update_visitor_count()
+# =============================
+# ✅ # Increment counter in Firestore
+# =============================
 
 # --- User Credentials ---
 USER_CREDENTIALS = {
@@ -441,6 +461,7 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
 
 
