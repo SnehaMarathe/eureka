@@ -15,36 +15,30 @@ import threading
 import firebase_admin
 from firebase_admin import credentials, firestore
 import requests
+from streamlit_javascript import st_javascript
 
-def get_user_ip_and_location():
-    try:
-        # Get public IP
-        ip_response = requests.get("https://api64.ipify.org?format=json", timeout=5)
-        ip = ip_response.json().get("ip", "Unknown")
+# =============================
+# 🌍 Get Browser-based Location
+# =============================
+def capture_browser_location():
+    # --- Get Public IP from the user's browser ---
+    ip = st_javascript("await fetch('https://api64.ipify.org?format=json').then(r => r.json()).then(data => data.ip)")
+    if ip:
+        st.session_state["ip"] = ip
 
-        # Get location using IP
-        location_response = requests.get(f"https://ipapi.co/{ip}/json/", timeout=5)
-        location_data = location_response.json()
-
-        return {
-            "ip": ip,
-            "city": location_data.get("city", "Unknown"),
-            "region": location_data.get("region", "Unknown"),
-            "country": location_data.get("country_name", "Unknown"),
-            "latitude": location_data.get("latitude", None),
-            "longitude": location_data.get("longitude", None)
-        }
-    except Exception as e:
-        return {
-            "ip": "Error",
-            "city": "Error",
-            "region": "Error",
-            "country": "Error",
-            "latitude": None,
-            "longitude": None,
-            "error": str(e)
-        }
-
+        # --- Get location details using IP ---
+        try:
+            location_response = requests.get(f"https://ipapi.co/{ip}/json/", timeout=5)
+            location_data = location_response.json()
+            st.session_state["city"] = location_data.get("city", "Unknown")
+            st.session_state["region"] = location_data.get("region", "Unknown")
+            st.session_state["country"] = location_data.get("country_name", "Unknown")
+            st.session_state["latitude"] = location_data.get("latitude")
+            st.session_state["longitude"] = location_data.get("longitude")
+        except Exception as e:
+            st.session_state["city"] = "Error"
+            st.session_state["country"] = "Error"
+            st.session_state["error"] = str(e)
 
 # =============================
 # 🔑 Initialize Firebase
@@ -65,7 +59,7 @@ def init_firebase():
         "token_uri": firebase_config["token_uri"],
         "auth_provider_x509_cert_url": firebase_config["auth_provider_x509_cert_url"],
         "client_x509_cert_url": firebase_config["client_x509_cert_url"],
-        "universe_domain": firebase_config["universe_domain"]
+        "universe_domain": firebase_config.get("universe_domain", "")
     })
 
     # Initialize only once
@@ -80,14 +74,20 @@ db = init_firebase()
 # 🛠️ Utility: Log Data
 # =============================
 def log_to_firebase(vehicle_name, df):
-    user_info = get_user_ip_and_location()
+    user_info = {
+        "ip": st.session_state.get("ip", "Unknown"),
+        "city": st.session_state.get("city", "Unknown"),
+        "region": st.session_state.get("region", "Unknown"),
+        "country": st.session_state.get("country", "Unknown"),
+        "latitude": st.session_state.get("latitude"),
+        "longitude": st.session_state.get("longitude")
+    }
     data = {
         "vehicle": vehicle_name,
         "records": df.to_dict(orient="records"),
         "user_info": user_info,
         "timestamp": datetime.now().isoformat()
     }
-    db.collection("diagnostics_logs").add(data)
 
 # =============================
 # ✅ Firestore Write Test
@@ -133,6 +133,10 @@ if "listener_started" not in st.session_state:
 if "visitor_counted" not in st.session_state:
     update_visitor_count_firestore()
     st.session_state["visitor_counted"] = True
+
+# Capture browser location once
+if "ip" not in st.session_state:
+    capture_browser_location()
 
 # =============================
 # ✅ # Increment counter in Firestore
@@ -491,6 +495,7 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
 
 
