@@ -16,13 +16,14 @@ from firebase_admin import credentials, firestore
 import requests
 
 
-# ======================
-# 🚀 Firebase Initialization (Cached)
-# ======================
+# =============================
+# 🔑 Initialize Firebase
+# =============================
 @st.cache_resource
 def init_firebase():
     firebase_config = st.secrets["FIREBASE"]
-
+    
+    # Prepare credentials
     cred = credentials.Certificate({
         "type": firebase_config["type"],
         "project_id": firebase_config["project_id"],
@@ -37,38 +38,34 @@ def init_firebase():
         "universe_domain": firebase_config["universe_domain"]
     })
 
+    # Initialize only once
     if not firebase_admin._apps:
         firebase_admin.initialize_app(cred)
-
+    
     return firestore.client()
 
 db = init_firebase()
 
-# ======================
-# 🌐 Get User IP
-# ======================
-def get_user_ip():
-    try:
-        response = requests.get("https://api64.ipify.org?format=json", timeout=5)
-        return response.json().get("ip", "unknown")
-    except Exception:
-        return "unknown"
-
-# ======================
-# 📝 Log to Firebase
-# ======================
-def log_to_firebase(vehicle_name, result_df):
-    user_ip = get_user_ip()
+# =============================
+# 🛠️ Utility: Log Data
+# =============================
+def log_to_firebase(vehicle_name, df):
     data = {
-        "username": st.session_state.get("username", "guest"),
-        "vehicle_name": vehicle_name,
-        "ip": user_ip,
-        "timestamp": datetime.now().isoformat(),
-        "results": result_df.to_dict(orient="records")
+        "vehicle": vehicle_name,
+        "records": df.to_dict(orient="records")
     }
     db.collection("diagnostics_logs").add(data)
-    st.success("📡 Data successfully saved to Firebase.")
 
+# =============================
+# ✅ Firestore Write Test
+# =============================
+try:
+    db.collection("test").add({"msg": "hello"})
+    st.success("Firestore write successful ✅")
+except Exception as e:
+    st.error(f"Firestore write failed ❌: {e}")
+
+# =============================
 
 # Try importing python-can for live CAN support
 try:
@@ -443,6 +440,7 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
 
 
