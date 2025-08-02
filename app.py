@@ -12,7 +12,7 @@ import os
 # ---2/8/2025---Adding Firebase 
 
 import firebase_admin
-import credentials, firestore
+from firebase_admin import credentials, firestore
 import requests
 
 # Try importing python-can for live CAN support
@@ -432,6 +432,7 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
 
 
