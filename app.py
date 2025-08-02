@@ -1,5 +1,6 @@
 # Phase 2 - 2 (with Live PCAN Support)
 import streamlit as st
+from streamlit_javascript import st_javascript
 import re
 import io
 import pandas as pd
@@ -15,7 +16,7 @@ import threading
 import firebase_admin
 from firebase_admin import credentials, firestore
 import requests
-from streamlit_javascript import st_javascript
+
 
 # =============================
 # 🌍 Get Browser-based Location
@@ -495,6 +496,7 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
 
 
