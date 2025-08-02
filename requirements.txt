@@ -5,3 +5,4 @@ streamlit-autorefresh
 reportlab
 python-can==4.3.1
 firebase-admin
+streamlit-javascript
