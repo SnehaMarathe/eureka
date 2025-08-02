@@ -80,6 +80,7 @@ db = init_firebase()
 # 🛠️ Utility: Log Data
 # =============================
 def log_to_firebase(vehicle_name, df):
+    user_info = get_user_ip_and_location()
     data = {
         "vehicle": vehicle_name,
         "records": df.to_dict(orient="records"),
@@ -490,6 +491,7 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
 
 
