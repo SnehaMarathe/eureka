@@ -9,6 +9,12 @@ from reportlab.pdfgen import canvas
 from reportlab.lib import colors
 from collections import defaultdict
 import os
+# ---2/8/2025---Adding Firebase 
+
+import firebase_admin
+from firebase_admin 
+import credentials, firestore
+import requests
 
 # Try importing python-can for live CAN support
 try:
@@ -301,6 +307,9 @@ if (uploaded_file or live_messages) and vehicle_name.strip():
 
     df = pd.DataFrame(report)
 
+    # ✅ Save to Firebase
+    log_to_firebase(vehicle_name, df)
+
     st.success("✅ Diagnostics completed!")
     st.subheader("📋 ECU Status")
     st.dataframe(df, use_container_width=True)
@@ -367,16 +376,6 @@ elif uploaded_file:
 elif vehicle_name:
     st.info("📂 Please upload a `.trc` file.")
 
-# ---2/8/2025---Adding Firebase 
-
-import firebase_admin
-from firebase_admin import credentials, firestore
-import requests
-
-import streamlit as st
-import firebase_admin
-from firebase_admin import credentials
-
 # Load secrets
 firebase_config = st.secrets["FIREBASE"]
 
@@ -434,4 +433,5 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
