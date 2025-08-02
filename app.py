@@ -42,7 +42,7 @@ def init_firebase():
     if not firebase_admin._apps:
         firebase_admin.initialize_app(cred)
     
-    return firestore.client()
+    db = firestore.client(database="euraka99")  # 👈 specify your DB name
 
 db = init_firebase()
 
@@ -440,6 +440,7 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
 
 
