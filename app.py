@@ -12,7 +12,6 @@ import os
 # ---2/8/2025---Adding Firebase 
 
 import firebase_admin
-from firebase_admin 
 import credentials, firestore
 import requests
 
@@ -433,5 +432,6 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
 
