@@ -8,6 +8,25 @@ from reportlab.lib.pagesizes import A4
 from reportlab.pdfgen import canvas
 from reportlab.lib import colors
 
+# Stretch table to full width
+st.markdown(
+    """
+    <style>
+    /* Stretch the main content */
+    .block-container {
+        max-width: 95% !important;
+        padding-left: 2rem;
+        padding-right: 2rem;
+    }
+    /* Make dataframe fill container */
+    .stDataFrame {
+        width: 100% !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True
+)
+
 # =============================
 # 🔑 Initialize Firebase
 # =============================
