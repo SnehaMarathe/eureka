@@ -83,38 +83,46 @@ if not logs:
     st.stop()
 
 # =============================
-# Display Logs (Record-Level)
+# Display Logs (Summary-Level)
 # =============================
-df_list = []
+summary_list = []
 
 for log in logs:
-    # Create DataFrame for each record in "records"
-    for record in log.get("records", []):
-        row = {
-            "vehicle": log.get("vehicle", "N/A"),
-            "timestamp": log.get("timestamp", "N/A"),
-            "ip": log.get("user_info", {}).get("ip", ""),
-            "city": log.get("user_info", {}).get("city", ""),
-            "region": log.get("user_info", {}).get("region", ""),
-            "country": log.get("user_info", {}).get("country", "")
-        }
-        # Merge record fields with meta info
-        row.update(record)
-        df_list.append(row)
+    record_count = len(log.get("records", []))
+    
+    # Collect unique ECUs and their statuses
+    ecu_status = {rec.get("ECU"): rec.get("Status") for rec in log.get("records", [])}
+    
+    row = {
+        "Log ID": log.get("log_id", "N/A"),
+        "Vehicle": log.get("vehicle", "N/A"),
+        "Timestamp": log.get("timestamp", "N/A"),
+        "IP": log.get("user_info", {}).get("ip", ""),
+        "City": log.get("user_info", {}).get("city", ""),
+        "Region": log.get("user_info", {}).get("region", ""),
+        "Country": log.get("user_info", {}).get("country", ""),
+        "Total Records": record_count,
+    }
+    
+    # Add ECU columns horizontally
+    for ecu, status in ecu_status.items():
+        row[f"{ecu} Status"] = status
+    
+    summary_list.append(row)
 
-# Combine all rows
-full_df = pd.DataFrame(df_list)
+# Convert to DataFrame
+summary_df = pd.DataFrame(summary_list)
 
-# Convert timestamps safely
-full_df["timestamp"] = pd.to_datetime(full_df["timestamp"], errors='coerce')
+# Convert timestamp
+summary_df["Timestamp"] = pd.to_datetime(summary_df["Timestamp"], errors='coerce')
 
 # Sort newest first
-full_df = full_df.sort_values(by="timestamp", ascending=False).reset_index(drop=True)
+summary_df = summary_df.sort_values(by="Timestamp", ascending=False).reset_index(drop=True)
 
-# Display in Streamlit
-st.dataframe(full_df)
+# Show in Streamlit
+st.dataframe(summary_df, use_container_width=True)
 
-
+# =============================
 
 # Search & Filters
 st.sidebar.header("🔎 Filters")
