@@ -121,7 +121,7 @@ summary_df["Timestamp"] = pd.to_datetime(summary_df["Timestamp"], errors='coerce
 summary_df = summary_df.sort_values(by="Timestamp", ascending=False).reset_index(drop=True)
 
 # Show in Streamlit
-st.dataframe(summary_df, use_container_width=True)
+# st.dataframe(summary_df, use_container_width=True)
 
 # =============================
 # Search & Filters
