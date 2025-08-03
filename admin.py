@@ -130,13 +130,14 @@ vehicle_filter = st.sidebar.text_input("Filter by Vehicle Name")
 country_filter = st.sidebar.text_input("Filter by Country")
 status_filter = st.sidebar.selectbox("Status", ["All", "✅ OK", "❌ MISSING"])
 
-filtered_df = full_df.copy()
+filtered_df = summary_df.copy()
 if vehicle_filter:
-    filtered_df = filtered_df[filtered_df["vehicle"].str.contains(vehicle_filter, case=False)]
+    filtered_df = filtered_df[filtered_df["Vehicle"].str.contains(vehicle_filter, case=False)]
 if country_filter:
-    filtered_df = filtered_df[filtered_df["country"].str.contains(country_filter, case=False)]
+    filtered_df = filtered_df[filtered_df["Country"].str.contains(country_filter, case=False)]
 if status_filter != "All":
-    filtered_df = filtered_df[filtered_df["Status"] == status_filter]
+    status_cols = [col for col in filtered_df.columns if "Status" in col]
+    filtered_df = filtered_df[filtered_df[status_cols].apply(lambda row: status_filter in row.values, axis=1)]
 
 st.dataframe(filtered_df, use_container_width=True)
 
