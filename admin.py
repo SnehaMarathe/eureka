@@ -4,6 +4,9 @@ from datetime import datetime
 import firebase_admin
 from firebase_admin import credentials, firestore
 import io
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.lib import colors
 
 # =============================
 # 🔑 Initialize Firebase
@@ -36,9 +39,7 @@ db = init_firebase()
 # =============================
 # Admin Credentials
 # =============================
-ADMIN_CREDENTIALS = {
-    "admin": "admin123"
-}
+ADMIN_CREDENTIALS = {"admin": "admin123"}
 
 def login():
     st.title("🔐 Admin Dashboard Login")
@@ -123,8 +124,8 @@ summary_df = summary_df.sort_values(by="Timestamp", ascending=False).reset_index
 st.dataframe(summary_df, use_container_width=True)
 
 # =============================
-
 # Search & Filters
+# =============================
 st.sidebar.header("🔎 Filters")
 vehicle_filter = st.sidebar.text_input("Filter by Vehicle Name")
 country_filter = st.sidebar.text_input("Filter by Country")
@@ -148,12 +149,8 @@ csv = filtered_df.to_csv(index=False).encode("utf-8")
 st.download_button("⬇️ Download Logs as CSV", csv, "diagnostics_logs.csv", "text/csv")
 
 # =============================
-# PDF Export (Optional)
+# PDF Export
 # =============================
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
-from reportlab.lib import colors
-
 def generate_pdf(df):
     buffer = io.BytesIO()
     c = canvas.Canvas(buffer, pagesize=A4)
@@ -162,8 +159,10 @@ def generate_pdf(df):
     c.drawString(50, height - 50, "Diagnostics Logs Report")
     c.setFont("Helvetica", 10)
     y = height - 80
-    headers = ["Vehicle", "ECU", "Status", "Timestamp", "City", "Country"]
-    col_widths = [80, 80, 50, 100, 80, 80]
+    
+    headers = ["Vehicle", "Timestamp", "ECU Statuses", "City", "Country"]
+    col_widths = [80, 100, 150, 80, 80]
+    
     # Header
     for i, header in enumerate(headers):
         c.setFillColor(colors.grey)
@@ -171,20 +170,29 @@ def generate_pdf(df):
         c.setFillColor(colors.white)
         c.drawString(55 + sum(col_widths[:i]), y + 5, header)
     y -= 20
+    
     # Rows
     for _, row in df.iterrows():
         if y < 50:
             c.showPage()
             y = height - 50
+        
+        ecu_cols = [col for col in df.columns if "Status" in col]
+        ecu_summary = ", ".join([f"{col.replace(' Status', '')}: {row[col]}" for col in ecu_cols if pd.notna(row[col])])
+        
         row_data = [
-            row["vehicle"], row["ECU"], row["Status"],
-            row["timestamp"].strftime("%Y-%m-%d %H:%M"),
-            row.get("city", ""), row.get("country", "")
+            row["Vehicle"],
+            row["Timestamp"].strftime("%Y-%m-%d %H:%M") if pd.notna(row["Timestamp"]) else "",
+            ecu_summary,
+            row.get("City", ""),
+            row.get("Country", "")
         ]
+        
         for i, value in enumerate(row_data):
             c.setFillColor(colors.black)
             c.drawString(55 + sum(col_widths[:i]), y, str(value))
         y -= 18
+    
     c.save()
     buffer.seek(0)
     return buffer
@@ -193,4 +201,3 @@ pdf = generate_pdf(filtered_df)
 st.download_button("⬇️ Download Logs as PDF", pdf, "diagnostics_logs.pdf")
 
 st.success("✅ Admin dashboard ready. You can filter and download logs.")
-
