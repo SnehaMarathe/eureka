@@ -1,3 +1,4 @@
+# Phase 2 - 2 (with Live PCAN Support)
 import streamlit as st
 from streamlit_javascript import st_javascript
 import re
@@ -16,14 +17,17 @@ import firebase_admin
 from firebase_admin import credentials, firestore
 import requests
 
+
 # =============================
 # 🌍 Get Browser-based Location
 # =============================
 def capture_browser_location():
+    # --- Get Public IP from the user's browser ---
     ip = st_javascript("await fetch('https://api64.ipify.org?format=json').then(r => r.json()).then(data => data.ip)")
     if ip:
         st.session_state["ip"] = ip
 
+        # --- Get location details using IP ---
         try:
             location_response = requests.get(f"https://ipapi.co/{ip}/json/", timeout=5)
             location_data = location_response.json()
@@ -44,6 +48,7 @@ def capture_browser_location():
 def init_firebase():
     firebase_config = st.secrets["FIREBASE"]
     
+    # Prepare credentials
     cred = credentials.Certificate({
         "type": firebase_config["type"],
         "project_id": firebase_config["project_id"],
@@ -58,6 +63,7 @@ def init_firebase():
         "universe_domain": firebase_config.get("universe_domain", "")
     })
 
+    # Initialize only once
     if not firebase_admin._apps:
         firebase_admin.initialize_app(cred)
 
@@ -84,10 +90,19 @@ def log_to_firebase(vehicle_name, df):
         "timestamp": datetime.now().isoformat()
     }
     db.collection("diagnostics_logs").add(data)
+# =============================
+# ✅ Firestore Write Test
+# =============================
+# try:
+#    db.collection("test").add({"msg": "hello"})
+#    st.success("Firestore write successful ✅")
+# except Exception as e:
+#    st.error(f"Firestore write failed ❌: {e}")
 
 # =============================
 # ✅ # Increment counter in Firestore
 # =============================
+
 def update_visitor_count_firestore():
     counter_ref = db.collection("visitors").document("counter")
     counter_doc = counter_ref.get()
@@ -101,6 +116,7 @@ def update_visitor_count_firestore():
 
     st.session_state["visitor_count"] = count
 
+# --- Listen for real-time updates ---
 def visitor_listener():
     counter_ref = db.collection("visitors").document("counter")
     def on_snapshot(doc_snapshot, changes, read_time):
@@ -109,28 +125,36 @@ def visitor_listener():
             st.session_state["visitor_count"] = count
     counter_ref.on_snapshot(on_snapshot)
 
+# --- Start listener only once ---
 if "listener_started" not in st.session_state:
     threading.Thread(target=visitor_listener, daemon=True).start()
     st.session_state["listener_started"] = True
 
+# --- Increment only once per session ---
 if "visitor_counted" not in st.session_state:
     update_visitor_count_firestore()
     st.session_state["visitor_counted"] = True
 
+# Capture browser location once
 if "ip" not in st.session_state:
     capture_browser_location()
 
 # =============================
-# Try importing python-can
+# ✅ # Increment counter in Firestore
 # =============================
+
+# Try importing python-can for live CAN support
 try:
     import can
     PCAN_AVAILABLE = True
 except ImportError:
     PCAN_AVAILABLE = False
 
+# --- Streamlit Config ---
 st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
 
+
+# --- User Credentials ---
 USER_CREDENTIALS = {
     "admin": "admin123",
     "user": "check2025"
@@ -158,6 +182,7 @@ if not st.session_state["authenticated"]:
     login()
     st.stop()
 
+# --- Header ---
 col1, col2, col3 = st.columns([1, 6, 1])
 with col1:
     st.image("BEM-Logo.png", width=150)
@@ -178,7 +203,7 @@ with col3:
     )
 st.markdown("<hr style='margin-top: 0.5rem;'>", unsafe_allow_html=True)
 
-# ECU mapping
+# --- ECU & Drawing Maps ---
 ecu_connector_map = {
     "Engine ECU": {"connector": "Connector 4", "location": "Front left engine bay near pre-fuse box", "harness": "Front Chassis Wiring Harness", "fuse": "F42"},
     "ABS ECU": {"connector": "Connector 3", "location": "Cabin firewall, near brake switch", "harness": "Cabin Harness Pig Tail", "fuse": "F47"},
@@ -204,7 +229,7 @@ drawing_map = {
     "Trailer Interface": "PEE0000084.pdf"
 }
 
-# Utility Functions
+# --- Utility Functions ---
 def extract_source_address(can_id):
     return can_id & 0xFF
 
@@ -312,6 +337,7 @@ has_double_tank = st.checkbox("Has Double Tank?", value=True)
 has_amt = st.checkbox("Has AMT?", value=True)
 has_retarder = st.checkbox("Has Retarder?", value=True)
 
+# Input mode selection
 input_mode = st.radio("Select Input Mode", (
     "Upload File",
     "Live PCAN" if PCAN_AVAILABLE else "Upload File Only"
@@ -341,4 +367,133 @@ if input_mode == "Live PCAN" and PCAN_AVAILABLE:
                 bus.shutdown()
                 st.success(f"✅ Captured {len(live_messages)} messages.")
             except Exception as e:
-                st.error(f"❌ PCAN connection failed: {e}
+                st.error(f"❌ PCAN connection failed: {e}")
+
+# --- Process Uploaded File or Live Messages ---
+uploaded_file = None
+if input_mode.startswith("Upload"):
+    uploaded_file = st.file_uploader("📁 Upload `.trc` File", type=["trc"])
+
+if (uploaded_file or live_messages) and vehicle_name.strip():
+    if uploaded_file:
+        lines = uploaded_file.read().decode("latin1").splitlines()
+        found_sources = {
+            extract_source_address(int(re.match(r'\s*\d+\)\s+[\d.]+\s+Rx\s+([0-9A-Fa-f]{6,8})', line).group(1), 16))
+            for line in lines if re.match(r'\s*\d+\)\s+[\d.]+\s+Rx\s+([0-9A-Fa-f]{6,8})', line)
+        }
+    else:
+        found_sources = {extract_source_address(msg.arbitration_id) for msg in live_messages}
+
+    ecu_map = {
+        0x17: "Instrument Cluster",
+        0x0B: "ABS ECU",
+        0xEE: "Telematics",
+        0x00: "Engine ECU",
+        0x4E: "LNG Sensor 1",
+        0x4F: "LNG Sensor 2",
+        0x05: "Gear Shift Lever",
+        0x03: "TCU",
+        0x10: "Retarder Controller",
+    }
+
+    report = []
+    for addr, ecu in ecu_map.items():
+        if ecu == "LNG Sensor 2" and not has_double_tank: continue
+        if ecu in ["TCU", "Gear Shift Lever"] and not has_amt: continue
+        if ecu == "Retarder Controller" and not has_retarder: continue
+        status = "✅ OK" if addr in found_sources else "❌ MISSING"
+        conn = ecu_connector_map.get(ecu, {})
+        report.append({
+            "ECU": ecu,
+            "Source Address": f"0x{addr:02X}",
+            "Status": status,
+            "Connector": conn.get("connector", "-"),
+            "Location": conn.get("location", "-"),
+            "Fuse": conn.get("fuse", "-")
+        })
+
+    df = pd.DataFrame(report)
+
+    # ✅ Save to Firebase
+    log_to_firebase(vehicle_name, df)
+
+    st.success("✅ Diagnostics completed!")
+    st.subheader("📋 ECU Status")
+    st.dataframe(df, use_container_width=True)
+
+    st.subheader("🧠 Root Cause Analysis")
+    for cause in infer_root_causes(df):
+        st.markdown(
+            f"""<div style='background:#fffbe6; border-left:5px solid #faad14; padding:10px; margin-bottom:10px;'>
+            <b>{cause['Type']}</b>: <code>{cause['Component']}</code><br>
+            Missing: {cause['Missing']} / {cause['Total']} — Confidence: {cause['Confidence']}%
+            <br>ECUs: {', '.join(cause['Affected ECUs'])}</div>""", unsafe_allow_html=True)
+
+    show_pdf = generate_pdf_buffer(report, vehicle_name)
+    st.download_button("⬇️ Download PDF Report", show_pdf, f"{vehicle_name}_diagnostics.pdf", "application/pdf")
+
+    st.subheader("🔧 Detailed ECU Diagnostics")
+    for _, row in df[df["Status"] == "❌ MISSING"].iterrows():
+        st.markdown(generate_detailed_diagnosis(row["ECU"]), unsafe_allow_html=True)
+
+
+        # --- Show Relevant Diagnostic Slides ---
+    st.markdown("---")
+    st.markdown("### 🖼️ Diagnostic Visual Reference")
+    
+    # Map ECUs, connectors, and fuses to slide numbers
+    slide_map = {
+        "Connector 3": [12],
+        "Connector 4": [3],
+        "89E": [5, 6, 7, 8, 9],
+        "Cabin Interface Connector (Brown)": [4],
+        "F47": [6],
+        "F46": [6],
+        "F42": [3],
+        "F43": [3],
+        "F52": [3],
+        "ABS ECU": [12],
+        "Telematics": [4],
+        "Instrument Cluster": [5, 6, 7],
+        "Engine ECU": [3],
+        "Gear Shift Lever": [3],
+        "TCU": [3],
+        "LNG Sensor 1": [3],
+        "LNG Sensor 2": [3],
+        "Retarder Controller": [3]
+    }
+    
+    # Collect unique relevant slides based on missing ECUs
+    missing_slides = set()
+    for row in report:
+        if row["Status"] == "❌ MISSING":
+            for key in [row["ECU"], row["Connector"], row["Fuse"]]:
+                missing_slides.update(slide_map.get(key, []))
+    
+    # Display slides
+    if missing_slides:
+        st.success(f"📌 Relevant slides for missing ECUs: {', '.join(f'Slide {s}' for s in sorted(missing_slides))}")
+        for slide_num in sorted(missing_slides):
+            st.image(f"static_images/Slide{slide_num}.PNG", caption=f"Slide {slide_num}", use_container_width=True)
+    else:
+        st.info("✅ No ECUs are missing — all components appear functional.")
+
+elif uploaded_file:
+    st.warning("⚠️ Please enter a vehicle name.")
+elif vehicle_name:
+    st.info("📂 Please upload a `.trc` file.")
+
+
+# --- Footer ---
+st.markdown("---")
+st.markdown(
+    """
+    <div style='text-align: center; font-size: 0.85em; color: gray;'>
+        © 2025 Blue Energy Motors.<br>
+        All rights reserved.<br>
+        This diagnostic tool and its associated materials are proprietary and intended for authorized diagnostic and engineering use only.
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
