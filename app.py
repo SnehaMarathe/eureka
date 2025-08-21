@@ -341,5 +341,6 @@ if input_mode == "Live PCAN" and PCAN_AVAILABLE:
                 bus.shutdown()
                 st.success(f"✅ Captured {len(live_messages)} messages.")
             except Exception as e:
-                st.error(f"❌ PCAN connection failed: {e})
+                st.error(f"❌ PCAN connection failed: {e}")
+
 
