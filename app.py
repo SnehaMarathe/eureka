@@ -10,20 +10,38 @@ from reportlab.lib import colors
 from collections import defaultdict
 import os
 import threading
-# ---2/8/2025---Adding Firebase 
+import tempfile
+import time
 
+# --- 2/8/2025 --- Adding Firebase
 import firebase_admin
 from firebase_admin import credentials, firestore
 import requests
 
 # =============================
+# Try importing python-can (Live PCAN support)
+# =============================
+try:
+    import can
+    PCAN_AVAILABLE = True
+except Exception:
+    PCAN_AVAILABLE = False
+
+# =============================
+# Streamlit Config
+# =============================
+st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
+
+# =============================
 # 🌍 Get Browser-based Location
 # =============================
+
 def capture_browser_location():
+    # Get Public IP from the user's browser
     ip = st_javascript("await fetch('https://api64.ipify.org?format=json').then(r => r.json()).then(data => data.ip)")
     if ip:
         st.session_state["ip"] = ip
-
+        # Get location details using IP
         try:
             location_response = requests.get(f"https://ipapi.co/{ip}/json/", timeout=5)
             location_data = location_response.json()
@@ -43,7 +61,7 @@ def capture_browser_location():
 @st.cache_resource
 def init_firebase():
     firebase_config = st.secrets["FIREBASE"]
-    
+
     cred = credentials.Certificate({
         "type": firebase_config["type"],
         "project_id": firebase_config["project_id"],
@@ -63,12 +81,14 @@ def init_firebase():
 
     return firestore.client()
 
+
 db = init_firebase()
 
 # =============================
 # 🛠️ Utility: Log Data
 # =============================
-def log_to_firebase(vehicle_name, df):
+
+def log_to_firebase(vehicle_name: str, df: pd.DataFrame):
     user_info = {
         "ip": st.session_state.get("ip", "Unknown"),
         "city": st.session_state.get("city", "Unknown"),
@@ -83,11 +103,15 @@ def log_to_firebase(vehicle_name, df):
         "user_info": user_info,
         "timestamp": datetime.now().isoformat()
     }
-    db.collection("diagnostics_logs").add(data)
+    try:
+        db.collection("diagnostics_logs").add(data)
+    except Exception as e:
+        st.warning(f"⚠️ Firestore log failed: {e}")
 
 # =============================
-# ✅ # Increment counter in Firestore
+# ✅ Visitors counter in Firestore (with listener)
 # =============================
+
 def update_visitor_count_firestore():
     counter_ref = db.collection("visitors").document("counter")
     counter_doc = counter_ref.get()
@@ -101,13 +125,17 @@ def update_visitor_count_firestore():
 
     st.session_state["visitor_count"] = count
 
+
 def visitor_listener():
     counter_ref = db.collection("visitors").document("counter")
+
     def on_snapshot(doc_snapshot, changes, read_time):
         for doc in doc_snapshot:
             count = doc.to_dict().get("count", 0)
             st.session_state["visitor_count"] = count
+
     counter_ref.on_snapshot(on_snapshot)
+
 
 if "listener_started" not in st.session_state:
     threading.Thread(target=visitor_listener, daemon=True).start()
@@ -121,20 +149,13 @@ if "ip" not in st.session_state:
     capture_browser_location()
 
 # =============================
-# Try importing python-can
+# Auth
 # =============================
-try:
-    import can
-    PCAN_AVAILABLE = True
-except ImportError:
-    PCAN_AVAILABLE = False
-
-st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
-
 USER_CREDENTIALS = {
     "admin": "admin123",
     "user": "check2025"
 }
+
 
 def login():
     st.markdown("## 🔐 User Login")
@@ -151,6 +172,7 @@ def login():
             else:
                 st.error("❌ Invalid username or password.")
 
+
 if "authenticated" not in st.session_state:
     st.session_state["authenticated"] = False
 
@@ -158,6 +180,9 @@ if not st.session_state["authenticated"]:
     login()
     st.stop()
 
+# =============================
+# Header
+# =============================
 col1, col2, col3 = st.columns([1, 6, 1])
 with col1:
     st.image("BEM-Logo.png", width=150)
@@ -166,19 +191,21 @@ with col2:
         """
         <div style='text-align: center;'>
             <h2 style='margin-bottom: 0;'>🔧 EurekaCheck - CAN Bus Diagnostic Tool</h2>
-            <p style='margin-top: 0;'>Connect PCAN or Upload a <code>.trc</code> file or read live PCAN to analyze ECU health.</p>
+            <p style='margin-top: 0;'>Connect PCAN or Upload a <code>.trc</code> file to analyze ECU health.</p>
         </div>
         """,
         unsafe_allow_html=True
     )
 with col3:
     st.markdown(
-        f"<p style='text-align: right; color: gray;'>👥 Visitors: {st.session_state['visitor_count']}</p>",
+        f"<p style='text-align: right; color: gray;'>👥 Visitors: {st.session_state.get('visitor_count', 0)}</p>",
         unsafe_allow_html=True
     )
 st.markdown("<hr style='margin-top: 0.5rem;'>", unsafe_allow_html=True)
 
-# ECU mapping
+# =============================
+# ECU & Drawing Maps
+# =============================
 ecu_connector_map = {
     "Engine ECU": {"connector": "Connector 4", "location": "Front left engine bay near pre-fuse box", "harness": "Front Chassis Wiring Harness", "fuse": "F42"},
     "ABS ECU": {"connector": "Connector 3", "location": "Cabin firewall, near brake switch", "harness": "Cabin Harness Pig Tail", "fuse": "F47"},
@@ -190,6 +217,7 @@ ecu_connector_map = {
     "LNG Sensor 2": {"connector": "Pig Tail Tank Sensor", "location": "Right rear tank (if double tank)", "harness": "Pig Tail for Double Tank", "fuse": "F52"},
     "Retarder Controller": {"connector": "Retarder Module Connector", "location": "Chassis, near prop shaft", "harness": "Retarder Wiring", "fuse": "F49"},
 }
+
 
 drawing_map = {
     "Connector 3": "PEE0000014_K.pdf",
@@ -204,9 +232,35 @@ drawing_map = {
     "Trailer Interface": "PEE0000084.pdf"
 }
 
-# Utility Functions
-def extract_source_address(can_id):
-    return can_id & 0xFF
+# =============================
+# Utility & Diagnostic Helpers
+# =============================
+
+def extract_source_address(arg):
+    """Dual-purpose helper:
+    - If arg is an int → returns the J1939 Source Address (LSB of CAN ID).
+    - If arg is a path (str) to a .trc file → parses and returns a DataFrame with a 'Source Address' column.
+    """
+    if isinstance(arg, int):
+        return arg & 0xFF
+    if isinstance(arg, str):
+        addrs = []
+        try:
+            with open(arg, "r", errors="ignore") as f:
+                for line in f:
+                    m = re.match(r"\s*\d+\)\s+[\d.]+\s+Rx\s+([0-9A-Fa-f]{6,8})", line)
+                    if m:
+                        addrs.append(int(m.group(1), 16) & 0xFF)
+                        continue
+                    m2 = re.search(r"ID\s*=\s*([0-9A-Fa-f]{6,8})", line)
+                    if m2:
+                        addrs.append(int(m2.group(1), 16) & 0xFF)
+            return pd.DataFrame({"Source Address": addrs}) if addrs else pd.DataFrame()
+        except Exception as e:
+            st.error(f"❌ Failed to parse .trc file: {e}")
+            return pd.DataFrame()
+    return pd.DataFrame()
+
 
 def generate_pdf_buffer(report_data, vehicle_name):
     buffer = io.BytesIO()
@@ -218,7 +272,7 @@ def generate_pdf_buffer(report_data, vehicle_name):
     c.drawString(50, height - 70, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     y = height - 100
     headers = ["ECU", "Source Addr", "Status", "Connector", "Location", "Fuse"]
-    col_widths = [100, 70, 60, 120, 120, 50]
+    col_widths = [130, 80, 80, 150, 150, 60]
     for i, header in enumerate(headers):
         c.setFillColor(colors.grey)
         c.rect(50 + sum(col_widths[:i]), y, col_widths[i], 20, fill=1)
@@ -237,8 +291,11 @@ def generate_pdf_buffer(report_data, vehicle_name):
     buffer.seek(0)
     return buffer
 
-def infer_root_causes(df):
+
+def infer_root_causes(df: pd.DataFrame):
     causes = {"Fuse": defaultdict(list), "Connector": defaultdict(list), "Harness": defaultdict(list)}
+    if df.empty:
+        return []
     for _, row in df[df["Status"] == "❌ MISSING"].iterrows():
         causes["Fuse"][row["Fuse"]].append(row["ECU"])
         causes["Connector"][row["Connector"].strip()].append(row["ECU"])
@@ -265,7 +322,8 @@ def infer_root_causes(df):
     ranked.sort(key=lambda x: (-x["Confidence"], -x["Missing"]))
     return ranked
 
-def generate_detailed_diagnosis(ecu_name):
+
+def generate_detailed_diagnosis(ecu_name: str):
     entry = ecu_connector_map.get(ecu_name, {})
     if not entry:
         return "No diagnostic mapping available."
@@ -303,7 +361,9 @@ def generate_detailed_diagnosis(ecu_name):
 4. Inspect harness `{harness}` bends and joints for breaks.
 """
 
-# --- User Inputs ---
+# =============================
+# Vehicle Inputs / Config
+# =============================
 st.markdown("### 🚛 Vehicle Info")
 vehicle_name = st.text_input("Enter Vehicle Name or ID", max_chars=30)
 
@@ -312,35 +372,192 @@ has_double_tank = st.checkbox("Has Double Tank?", value=True)
 has_amt = st.checkbox("Has AMT?", value=True)
 has_retarder = st.checkbox("Has Retarder?", value=True)
 
-input_mode = st.radio("Select Input Mode", (
-    "Upload File",
-    "Live PCAN" if PCAN_AVAILABLE else "Upload File Only"
-))
+# =============================
+# --- CAN Data Input Section --- (Integrated)
+# =============================
+st.markdown("### 📡 CAN Data Input")
 
-# --- Live PCAN Mode ---
-live_messages = []
-if input_mode == "Live PCAN" and PCAN_AVAILABLE:
-    with st.form("live_pcan_form"):
-        st.write("### 🔌 Connect to PCAN")
-        channel = st.text_input("PCAN Channel (e.g., PCAN_USBBUS1)", "PCAN_USBBUS1")
-        bitrate = st.selectbox("Bitrate", ["500000", "250000", "125000"], index=0)
-        duration = st.slider("Capture Duration (seconds)", 1, 30, 5)
-        submitted = st.form_submit_button("▶️ Start Live Diagnostics")
+# Option 1: Upload CAN trace file
+st.subheader("Upload Trace File")
+uploaded_file = st.file_uploader("Upload CAN Trace (.trc)", type=["trc"])
 
-        if submitted:
-            st.info(f"Connecting to {channel} @ {bitrate} bps...")
-            try:
-                bus = can.interface.Bus(channel=channel, bustype='pcan', bitrate=int(bitrate))
-                st.success("Connected. Reading messages...")
-                start_time = datetime.now()
-                with st.spinner("Capturing messages..."):
-                    while (datetime.now() - start_time).seconds < duration:
-                        msg = bus.recv(timeout=0.2)
-                        if msg:
-                            live_messages.append(msg)
-                bus.shutdown()
-                st.success(f"✅ Captured {len(live_messages)} messages.")
-            except Exception as e:
-                st.error(f"❌ PCAN connection failed: {e}")
+df = pd.DataFrame()  # Default empty
 
+if uploaded_file is not None:
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".trc") as tmp_file:
+        tmp_file.write(uploaded_file.getvalue())
+        tmp_path = tmp_file.name
+    df = extract_source_address(tmp_path)
+    st.success("✅ Trace file processed successfully.")
 
+# Option 2: Live PCAN read
+st.subheader("Live PCAN (Optional)")
+bus = None
+if PCAN_AVAILABLE:
+    try:
+        bus = can.interface.Bus(bustype="pcan", channel="PCAN_USBBUS1", bitrate=500000)
+        st.success("✅ Connected to PCAN successfully.")
+    except Exception as e:
+        st.error(f"❌ PCAN connection failed: {e}")
+        bus = None
+else:
+    st.info("ℹ️ python-can not installed or PCAN not available on this machine.")
+
+if bus:
+    st.info("Reading live messages from PCAN…")
+    live_data = []
+    start_time = time.time()
+    while time.time() - start_time < 5:  # 5 seconds live capture
+        msg = bus.recv(1)
+        if msg:
+            live_data.append(msg.arbitration_id)
+    if live_data:
+        df = pd.DataFrame({"Source Address": [extract_source_address(mid) for mid in live_data]})
+        st.success(f"✅ Captured {len(live_data)} messages from PCAN.")
+
+# =============================
+# ECU Address Map for Detection
+# =============================
+ecu_map = {
+    0x17: "Instrument Cluster",
+    0x0B: "ABS ECU",
+    0xEE: "Telematics",
+    0x00: "Engine ECU",
+    0x4E: "LNG Sensor 1",
+    0x4F: "LNG Sensor 2",
+    0x05: "Gear Shift Lever",
+    0x03: "TCU",
+    0x10: "Retarder Controller",
+}
+
+# =============================
+# Build Diagnostic Report
+# =============================
+report = []
+
+if not vehicle_name.strip():
+    st.info("📂 Please enter a vehicle name.")
+else:
+    found_sources = set()
+    if not df.empty and "Source Address" in df.columns:
+        try:
+            found_sources = {int(x) for x in df["Source Address"].astype(int).tolist()}
+        except Exception:
+            # If hex strings were somehow present
+            found_sources = {int(str(x), 16) if isinstance(x, str) and re.fullmatch(r"[0-9A-Fa-f]+", str(x)) else int(x) for x in df["Source Address"].tolist() if str(x) != "nan"}
+
+    for addr, ecu in ecu_map.items():
+        if ecu == "LNG Sensor 2" and not has_double_tank:
+            continue
+        if ecu in ["TCU", "Gear Shift Lever"] and not has_amt:
+            continue
+        if ecu == "Retarder Controller" and not has_retarder:
+            continue
+        status = "✅ OK" if addr in found_sources else "❌ MISSING"
+        conn = ecu_connector_map.get(ecu, {})
+        report.append({
+            "ECU": ecu,
+            "Source Address": f"0x{addr:02X}",
+            "Status": status,
+            "Connector": conn.get("connector", "-"),
+            "Location": conn.get("location", "-"),
+            "Fuse": conn.get("fuse", "-")
+        })
+
+    df_report = pd.DataFrame(report)
+
+    if not df_report.empty:
+        # Log to Firebase
+        log_to_firebase(vehicle_name, df_report)
+
+        st.success("✅ Diagnostics completed!")
+        st.subheader("📋 ECU Status")
+        st.dataframe(df_report, use_container_width=True)
+
+        st.subheader("🧠 Root Cause Analysis")
+        for cause in infer_root_causes(df_report):
+            st.markdown(
+                f"""<div style='background:#fffbe6; border-left:5px solid #faad14; padding:10px; margin-bottom:10px;'>
+                <b>{cause['Type']}</b>: <code>{cause['Component']}</code><br>
+                Missing: {cause['Missing']} / {cause['Total']} — Confidence: {cause['Confidence']}%
+                <br>ECUs: {', '.join(cause['Affected ECUs'])}</div>""",
+                unsafe_allow_html=True
+            )
+
+        show_pdf = generate_pdf_buffer(report, vehicle_name)
+        st.download_button("⬇️ Download PDF Report", show_pdf, f"{vehicle_name}_diagnostics.pdf", "application/pdf")
+
+        st.subheader("🔧 Detailed ECU Diagnostics")
+        for _, row in df_report[df_report["Status"] == "❌ MISSING"].iterrows():
+            st.markdown(generate_detailed_diagnosis(row["ECU"]), unsafe_allow_html=True)
+
+        # --- Diagnostic Visual Reference ---
+        st.markdown("---")
+        st.markdown("### 🖼️ Diagnostic Visual Reference")
+
+        # Static mapping preserved (functionality unchanged)
+        slide_map = {
+            "Connector 3": [12],
+            "Connector 4": [3],
+            "89E": [5, 6, 7, 8, 9],
+            "Cabin Interface Connector (Brown)": [4],
+            "F47": [6],
+            "F46": [6],
+            "F42": [3],
+            "F43": [3],
+            "F52": [3],
+            "ABS ECU": [12],
+            "Telematics": [4],
+            "Instrument Cluster": [5, 6, 7],
+            "Engine ECU": [3],
+            "Gear Shift Lever": [3],
+            "TCU": [3],
+            "LNG Sensor 1": [3],
+            "LNG Sensor 2": [3],
+            "Retarder Controller": [3]
+        }
+
+        # Dynamically resolve slide image paths ("Electrical Wiring" first, fallback to old "static_images")
+        def get_slide_path(slide_num: int):
+            candidates = [
+                os.path.join("Electrical Wiring", f"Slide{slide_num}.PNG"),
+                os.path.join("Electrical Wiring", f"Slide{slide_num}.png"),
+                os.path.join("static_images", f"Slide{slide_num}.PNG"),
+                os.path.join("static_images", f"Slide{slide_num}.png"),
+            ]
+            for p in candidates:
+                if os.path.exists(p):
+                    return p
+            return None
+
+        # Collect unique relevant slides based on missing ECUs
+        missing_slides = set()
+        for row in report:
+            if row["Status"] == "❌ MISSING":
+                for key in [row["ECU"], row["Connector"], row["Fuse"]]:
+                    missing_slides.update(slide_map.get(key, []))
+
+        # Display slides
+        if missing_slides:
+            st.success("📌 Relevant slides for missing ECUs: " + ", ".join(f"Slide {s}" for s in sorted(missing_slides)))
+            for slide_num in sorted(missing_slides):
+                slide_path = get_slide_path(slide_num)
+                if slide_path:
+                    st.image(slide_path, caption=f"Slide {slide_num}", use_container_width=True)
+                else:
+                    st.warning(f"⚠️ Slide {slide_num} image not found in 'Electrical Wiring' or 'static_images'.")
+        else:
+            st.info("✅ No ECUs are missing — all components appear functional.")
+
+# --- Footer ---
+st.markdown("---")
+st.markdown(
+    """
+    <div style='text-align: center; font-size: 0.85em; color: gray;'>
+        © 2025 Blue Energy Motors.<br>
+        All rights reserved.<br>
+        This diagnostic tool and its associated materials are proprietary and intended for authorized diagnostic and engineering use only.
+    </div>
+    """,
+    unsafe_allow_html=True
+)
