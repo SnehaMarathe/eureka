@@ -1,4 +1,4 @@
-# app.py — EurekaCheck Unified Diagnostic Tool (with upgraded DM1 parser)
+# app.py — EurekaCheck Unified Diagnostic Tool (with TP/BAM assembler + DM1 decode)
 import streamlit as st
 from streamlit_javascript import st_javascript
 import re
@@ -335,40 +335,186 @@ def parse_trc_file(file_path: str) -> pd.DataFrame:
 # J1939 / DM1 parsing (SPN/FMI extraction)
 # -------------------------
 DM1_PGN = 0xFECA  # 65226
+TP_CM_PGN = 0xEC00  # 60416 (TP.CM)
+TP_DT_PGN = 0xEB00  # 60160 (TP.DT)
 
 def decode_dtc_4bytes(b1, b2, b3, b4):
-    """Convert 4 bytes to SPN, FMI, OC using J1939 layout."""
-    spn = int(b1) | (int(b2) << 8) | ((int(b3) & 0x07) << 16)   # 19-bit SPN
-    fmi = (int(b3) >> 3) & 0x1F                                  # 5-bit FMI
+    """Convert 4 bytes to SPN, FMI, OC using J1939 layout (alternate bit math)."""
+    # Standard J1939: 19-bit SPN built from b1 (LSB), top 3 bits of b2, and b3 as MSBs
+    spn = int(b1) | ((int(b2) & 0xE0) << 3) | (int(b3) << 11)
+    fmi = int(b2) & 0x1F
     oc = int(b4)
     return spn, fmi, oc
 
-def parse_dm1_frame(data_bytes: bytes):
+def parse_dm1_frame_with_lamp(data_bytes: bytes):
     """
-    Robust DM1 parser:
-    - We scan offsets 1..len-4 looking for 4-byte DTC entries (keeps spn>0).
-    - This makes the parser tolerant to slight format differences in logs.
-    Returns list of dicts: {SPN, FMI, OC}
+    Parse DM1 payload and return (lamp_status_dict, list_of_dtcs).
+    lamp_status_dict contains booleans for MIL, RSL, AWL, PL based on byte0.
+    dtcs is a list of {SPN,FMI,OC,offset}.
     """
+    lamp = {"MIL": None, "RSL": None, "AWL": None, "PL": None}
     dtcs = []
-    if not data_bytes or len(data_bytes) < 4:
-        return dtcs
+    if not data_bytes or len(data_bytes) < 1:
+        return lamp, dtcs
 
-    # Typical DM1 places a lamp byte at index 0; DTCs usually start at index 1.
-    # We'll slide a 4-byte window across offsets 1..len-4 and accept entries where SPN > 0.
-    for offset in range(1, max(1, len(data_bytes) - 3)):
-        if offset + 4 <= len(data_bytes):
+    # Lamp byte interpretation (bits per J1939)
+    lamp_byte = data_bytes[0]
+    # According to J1939 DM1 lamp codes: often encoded in 2-bit values per lamp; map to simple ON/OFF/NotUsed
+    # We'll mark as ON if bits indicate commanded lamp states (non-zero)
+    # For a robust display, decode as:
+    # bits 0-1: MIL state (00=off,01=on,10=reserved,11=not available) - treat 01 as ON
+    def twobit(val, shift):
+        return (val >> shift) & 0x03
+    try:
+        mil_state = twobit(lamp_byte, 0)
+        rsl_state = twobit(lamp_byte, 2)
+        awl_state = twobit(lamp_byte, 4)
+        pl_state = twobit(lamp_byte, 6)
+        lamp["MIL"] = (mil_state == 1)
+        lamp["RSL"] = (rsl_state == 1)
+        lamp["AWL"] = (awl_state == 1)
+        lamp["PL"] = (pl_state == 1)
+    except Exception:
+        lamp = {"MIL": None, "RSL": None, "AWL": None, "PL": None}
+
+    # Now parse DTCs — scan for 4-byte windows starting at offset 1
+    if len(data_bytes) >= 5:
+        for offset in range(1, len(data_bytes) - 3):
             b1, b2, b3, b4 = data_bytes[offset:offset+4]
             spn, fmi, oc = decode_dtc_4bytes(b1, b2, b3, b4)
             if spn > 0 and 0 <= fmi <= 31:
                 dtcs.append({"SPN": spn, "FMI": fmi, "OC": oc, "offset": offset})
-    # Remove duplicates preserving first occurrence
+    # dedupe keeping highest OC
     unique = {}
     for d in dtcs:
         key = (d["SPN"], d["FMI"])
         if key not in unique or d["OC"] > unique[key]["OC"]:
             unique[key] = d
-    return list(unique.values())
+    return lamp, list(unique.values())
+
+# -------------------------
+# TP/BAM assembler
+# -------------------------
+def assemble_tp_bam(df: pd.DataFrame):
+    """
+    Assemble BAM (broadcast) multi-packet messages from TP.CM and TP.DT.
+    Returns list of dicts: each dict = {"PGN": pgn, "Source": sa, "Data": bytes(...), "Timestamp": first_ts}
+    Approach:
+      - Find TP.CM entries (pgn == TP_CM_PGN) with control byte 0x20 (BAM).
+      - Extract total size (2 bytes), total packets (1 byte), and transported PGN (3 bytes) from TP.CM data[1..6].
+      - Then find subsequent TP.DT frames from same source (arbitration id LSB source) with pgn TP_DT_PGN, sequence numbers 1..N.
+      - Concatenate data bytes from TP.DT in order to reconstruct the full payload.
+    Notes:
+      - This is a simple assembler suitable for logs where TP.CM appears before its TP.DT frames (typical).
+      - If TP.DT frames are interleaved from multiple sources, we track per-source.
+    """
+    assembled = []
+    if df is None or df.empty:
+        return assembled
+
+    # We'll iterate through the log in order and maintain open BAMs per source
+    # convert df to list of rows with index to preserve order
+    rows = df.reset_index().to_dict(orient="records")
+    open_bams = {}  # key = (source_sa), value = { pgn, total_size, total_packets, received: {seq:bytes}, start_ts }
+
+    for row in rows:
+        can_id = row.get("CAN ID")
+        data = row.get("Data")
+        ts = row.get("Timestamp", None)
+        if can_id is None or not isinstance(data, (bytes, bytearray)):
+            continue
+        pgn = (can_id >> 8) & 0xFFFF
+        sa = int(can_id & 0xFF)
+        # TP.CM (control) handling
+        if pgn == TP_CM_PGN:
+            # data[0] = control byte
+            if len(data) < 8:
+                continue
+            control = data[0]
+            if control == 0x20:  # BAM
+                total_size = data[1] | (data[2] << 8)
+                total_packets = data[3]
+                # data[5], data[6], data[7] form the PGN (LSB first?) — in TP.CM the transported PGN is bytes 5-7 little-endian
+                # Commonly transported PGN = data[5] + (data[6]<<8) + (data[7]<<16)
+                transported_pgn = data[5] | (data[6] << 8) | (data[7] << 16)
+                # initialize open BAM for this source (no dest for BAM)
+                open_bams[sa] = {
+                    "PGN": transported_pgn & 0xFFFFFF,
+                    "total_size": total_size,
+                    "total_packets": total_packets,
+                    "received": {},
+                    "start_ts": ts
+                }
+            else:
+                # other control messages (RTS/CTS/etc.) not handled here — we focus on BAM for broadcast DM1
+                continue
+
+        # TP.DT handling
+        elif pgn == TP_DT_PGN:
+            if len(data) < 1:
+                continue
+            seq = data[0]  # sequence number 1..n
+            payload = bytes(data[1:])  # rest of bytes are payload (typically 7 bytes per DT)
+            if sa in open_bams and open_bams[sa]["total_packets"] >= seq >= 1:
+                open_bams[sa]["received"][seq] = payload
+                # check if BAM complete
+                if len(open_bams[sa]["received"]) >= open_bams[sa]["total_packets"]:
+                    # assemble in order
+                    parts = []
+                    for s in range(1, open_bams[sa]["total_packets"] + 1):
+                        parts.append(open_bams[sa]["received"].get(s, b""))
+                    data_full = b"".join(parts)[:open_bams[sa]["total_size"]]
+                    assembled.append({
+                        "PGN": open_bams[sa]["PGN"] & 0xFFFFFF,
+                        "Source": sa,
+                        "Data": data_full,
+                        "Timestamp": open_bams[sa]["start_ts"]
+                    })
+                    # remove open bam
+                    del open_bams[sa]
+            else:
+                # unexpected DT for unknown BAM — ignore
+                continue
+        else:
+            continue
+
+    return assembled
+
+def merge_assembled_into_df(df_can: pd.DataFrame, assembled_msgs: list):
+    """
+    Build a DataFrame that contains original rows plus synthetic rows for assembled messages.
+    Synthetic rows will have 'CAN ID' reconstructed as (PGN<<8) | source,
+    DLC = len(data), Data = assembled bytes, Timestamp = start_ts
+    """
+    synthetic_rows = []
+    for m in assembled_msgs:
+        pgn = int(m["PGN"]) & 0xFFFF
+        # Some PGNs from TP.CM transported PGN are 3 bytes (24-bit), but our CAN ID pgn field uses 16 bits (PF+PS).
+        # We will reconstruct a 29-bit CAN ID with PGN in bits [8..25] by simply using (PGN<<8) | source
+        can_id = (m["PGN"] << 8) | (m["Source"] & 0xFF)
+        data = m["Data"]
+        dlc = len(data)
+        synthetic_rows.append({
+            "Timestamp": m.get("Timestamp"),
+            "CAN ID": int(can_id),
+            "DLC": dlc,
+            "Data": data,
+            "Source Address": int(m["Source"]),
+            "Assembled": True
+        })
+    # mark existing rows with Assembled = False to be consistent
+    base = df_can.copy()
+    if not base.empty:
+        base = base.assign(Assembled=False)
+    if synthetic_rows:
+        df_synth = pd.DataFrame(synthetic_rows)
+        combined = pd.concat([base, df_synth], ignore_index=True, sort=False)
+    else:
+        combined = base
+    # preserve original order by Timestamp if available; otherwise keep as-is
+    if "Timestamp" in combined.columns and combined["Timestamp"].notna().any():
+        combined = combined.sort_values(by=["Timestamp"], na_position="last").reset_index(drop=True)
+    return combined
 
 # -------------------------
 # DTC lookup loader (merged JSON preferred, fallback to Excel)
@@ -434,7 +580,7 @@ def load_dtc_lookup(excel_path: str = EXCEL_DTC_PATH,
         entry["Description"] = " | ".join(bits) if bits else ""
         lookup[(spn, fmi)] = entry
 
-    # attempt to persist JSON cache for next runs
+    # persist JSON cache
     try:
         with open(json_cache, "w", encoding="utf-8") as f:
             json.dump(list(lookup.values()), f, indent=2, ensure_ascii=False)
@@ -449,10 +595,23 @@ DTC_LOOKUP = load_dtc_lookup()
 # DTC decode routine (applies lookup)
 # -------------------------
 def decode_dtcs_from_df(df: pd.DataFrame) -> pd.DataFrame:
-    rows = []
+    """
+    This routine:
+      - Assembles BAM messages
+      - Merges assembled messages into the working dataframe
+      - Parses DM1 (single-frame and assembled)
+      - Returns a DataFrame of decoded DTCs with lamp status and lookup descriptions
+    """
     if df is None or df.empty:
         return pd.DataFrame()
-    for _, r in df.iterrows():
+
+    # 1) Assemble BAM messages
+    assembled = assemble_tp_bam(df)
+    merged_df = merge_assembled_into_df(df, assembled)
+
+    # 2) For each row (including synthetic assembled ones), find DM1 PGN and parse
+    rows = []
+    for _, r in merged_df.iterrows():
         can_id = r.get("CAN ID")
         data = r.get("Data")
         if can_id is None or not isinstance(data, (bytes, bytearray)):
@@ -460,19 +619,43 @@ def decode_dtcs_from_df(df: pd.DataFrame) -> pd.DataFrame:
         pgn = (can_id >> 8) & 0xFFFF
         if pgn != DM1_PGN:
             continue
-        for d in parse_dm1_frame(data):
+        lamp, dtcs = parse_dm1_frame_with_lamp(data)
+        for d in dtcs:
             key = (d["SPN"], d["FMI"])
             entry = DTC_LOOKUP.get(key, {})
             rows.append({
                 "Time": r.get("Timestamp"),
                 "Source Address": f"0x{(can_id & 0xFF):02X}",
+                "Assembled": bool(r.get("Assembled", False)),
                 "SPN": d["SPN"],
                 "FMI": d["FMI"],
                 "OC": d["OC"],
                 "DTC": entry.get("DTC", ""),
                 "Title": entry.get("Title", "") or entry.get("Name", ""),
                 "Description": entry.get("Description", "Unknown (not in lookup)"),
-                "Error Class": entry.get("Error Class", "")
+                "Error Class": entry.get("Error Class", ""),
+                "MIL": lamp.get("MIL"),
+                "RSL": lamp.get("RSL"),
+                "AWL": lamp.get("AWL"),
+                "PL": lamp.get("PL")
+            })
+        # If no dtcs but lamp indicates MIL ON, still report lamp status row
+        if not dtcs and lamp.get("MIL"):
+            rows.append({
+                "Time": r.get("Timestamp"),
+                "Source Address": f"0x{(can_id & 0xFF):02X}",
+                "Assembled": bool(r.get("Assembled", False)),
+                "SPN": None,
+                "FMI": None,
+                "OC": None,
+                "DTC": "",
+                "Title": "",
+                "Description": "No SPN/FMI present in payload — MIL ON",
+                "Error Class": "",
+                "MIL": lamp.get("MIL"),
+                "RSL": lamp.get("RSL"),
+                "AWL": lamp.get("AWL"),
+                "PL": lamp.get("PL")
             })
     out = pd.DataFrame(rows)
     if not out.empty:
