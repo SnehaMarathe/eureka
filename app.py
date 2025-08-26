@@ -1,4 +1,3 @@
-# app.py — EurekaCheck Unified Diagnostic Tool (TP/BAM reassembly + DM1 with DTC count parsing)
 import streamlit as st
 from streamlit_javascript import st_javascript
 import re
@@ -14,40 +13,31 @@ import threading
 import tempfile
 import time
 import json
-import requests
 
-# Firebase
+# --- 2/8/2025 --- Adding Firebase
 import firebase_admin
 from firebase_admin import credentials, firestore
+import requests
 
-# Optional PCAN/live CAN support
+# =============================
+# Try importing python-can (Live PCAN support)
+# =============================
 try:
     import can
     PCAN_AVAILABLE = True
 except Exception:
     PCAN_AVAILABLE = False
 
-# -------------------------
-# Streamlit config
-# -------------------------
+# =============================
+# Streamlit Config
+# =============================
 st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
 
-# -------------------------
-# Config paths (adjust if needed)
-# -------------------------
-EXCEL_DTC_PATH = "F300G810_FnR_T222BECDG8100033206_Trimmed_Signed.xlsx"
-EXCEL_SHEET = "Sheet1"
-EXCEL_HEADER_ROW = 3
-JSON_LOOKUP_PATH = "dtc_lookup_merged.json"  # merged Excel+PDF JSON we created earlier
-
-# -------------------------
-# Helper: Browser-based location (via JS)
-# -------------------------
+# =============================
+# 🌍 Get Browser-based Location
+# =============================
 def capture_browser_location():
-    try:
-        ip = st_javascript("await fetch('https://api64.ipify.org?format=json').then(r => r.json()).then(data => data.ip)")
-    except Exception:
-        ip = None
+    ip = st_javascript("await fetch('https://api64.ipify.org?format=json').then(r => r.json()).then(data => data.ip)")
     if ip:
         st.session_state["ip"] = ip
         try:
@@ -63,17 +53,12 @@ def capture_browser_location():
             st.session_state["country"] = "Error"
             st.session_state["error"] = str(e)
 
-# -------------------------
-# Initialize Firebase
-# -------------------------
+# =============================
+# 🔑 Initialize Firebase
+# =============================
 @st.cache_resource
 def init_firebase():
-    try:
-        firebase_config = st.secrets["FIREBASE"]
-    except Exception:
-        st.warning("⚠️ Firebase secrets not found in Streamlit secrets. Firebase features will be disabled.")
-        return None
-
+    firebase_config = st.secrets["FIREBASE"]
     cred = credentials.Certificate({
         "type": firebase_config["type"],
         "project_id": firebase_config["project_id"],
@@ -87,24 +72,16 @@ def init_firebase():
         "client_x509_cert_url": firebase_config["client_x509_cert_url"],
         "universe_domain": firebase_config.get("universe_domain", "")
     })
-
     if not firebase_admin._apps:
         firebase_admin.initialize_app(cred)
-
     return firestore.client()
 
-db = None
-try:
-    db = init_firebase()
-except Exception:
-    db = None
+db = init_firebase()
 
-# -------------------------
-# Firebase logging & visitor counter helpers
-# -------------------------
+# =============================
+# Utility: Log Data
+# =============================
 def log_to_firebase(vehicle_name: str, df: pd.DataFrame):
-    if db is None:
-        return
     user_info = {
         "ip": st.session_state.get("ip", "Unknown"),
         "city": st.session_state.get("city", "Unknown"),
@@ -124,58 +101,42 @@ def log_to_firebase(vehicle_name: str, df: pd.DataFrame):
     except Exception as e:
         st.warning(f"⚠️ Firestore log failed: {e}")
 
+# =============================
+# ✅ Visitors counter in Firestore (with listener)
+# =============================
 def update_visitor_count_firestore():
-    if db is None:
-        st.session_state["visitor_count"] = st.session_state.get("visitor_count", 0)
-        return
-    try:
-        counter_ref = db.collection("visitors").document("counter")
-        counter_doc = counter_ref.get()
-        if not counter_doc.exists:
-            counter_ref.set({"count": 1})
-            count = 1
-        else:
-            count = counter_doc.to_dict().get("count", 0) + 1
-            counter_ref.update({"count": count})
-        st.session_state["visitor_count"] = count
-    except Exception:
-        st.session_state["visitor_count"] = st.session_state.get("visitor_count", 0)
+    counter_ref = db.collection("visitors").document("counter")
+    counter_doc = counter_ref.get()
+    if not counter_doc.exists:
+        counter_ref.set({"count": 1})
+        count = 1
+    else:
+        count = counter_doc.to_dict().get("count", 0) + 1
+        counter_ref.update({"count": count})
+    st.session_state["visitor_count"] = count
 
 def visitor_listener():
-    if db is None:
-        return
     counter_ref = db.collection("visitors").document("counter")
     def on_snapshot(doc_snapshot, changes, read_time):
         for doc in doc_snapshot:
             count = doc.to_dict().get("count", 0)
             st.session_state["visitor_count"] = count
-    try:
-        counter_ref.on_snapshot(on_snapshot)
-    except Exception:
-        pass
+    counter_ref.on_snapshot(on_snapshot)
 
-# start listener thread once
 if "listener_started" not in st.session_state:
-    try:
-        threading.Thread(target=visitor_listener, daemon=True).start()
-    except Exception:
-        pass
+    threading.Thread(target=visitor_listener, daemon=True).start()
     st.session_state["listener_started"] = True
-
 if "visitor_counted" not in st.session_state:
     update_visitor_count_firestore()
     st.session_state["visitor_counted"] = True
-
 if "ip" not in st.session_state:
-    try:
-        capture_browser_location()
-    except Exception:
-        pass
+    capture_browser_location()
 
-# -------------------------
-# Authentication
-# -------------------------
-USER_CREDENTIALS = {"admin": "admin123", "user": "check2025"}
+# =============================
+# Auth
+# =============================
+USER_CREDENTIALS = {"admin": "admin123","user": "check2025"}
+
 def login():
     st.markdown("## 🔐 User Login")
     with st.form("login_form"):
@@ -197,177 +158,29 @@ if not st.session_state["authenticated"]:
     login()
     st.stop()
 
-# -------------------------
-# Header + layout
-# -------------------------
-col1, col2, col3 = st.columns([1, 6, 1])
-with col1:
-    try:
-        st.image("BEM-Logo.png", width=150)
-    except Exception:
-        pass
-with col2:
-    st.markdown(
-        """
-        <div style='text-align: center;'>
-            <h2 style='margin-bottom: 0;'>🔧 EurekaCheck - CAN Bus Diagnostic Tool</h2>
-            <p style='margin-top: 0;'>Connect PCAN or Upload a <code>.trc</code> file to analyze ECU health & DTCs.</p>
-        </div>
-        """, unsafe_allow_html=True
-    )
-with col3:
-    st.markdown(
-        f"<p style='text-align: right; color: gray;'>👥 Visitors: {st.session_state.get('visitor_count', 0)}</p>",
-        unsafe_allow_html=True
-    )
-st.markdown("<hr style='margin-top: 0.5rem;'>", unsafe_allow_html=True)
-
-# -------------------------
-# ECU connector map & drawing map (preserve your original mappings)
-# -------------------------
-ecu_connector_map = {
-    "Engine ECU": {"connector": "Connector 4", "location": "Front left engine bay near pre-fuse box", "harness": "Front Chassis Wiring Harness", "fuse": "F42"},
-    "ABS ECU": {"connector": "Connector 3", "location": "Cabin firewall, near brake switch", "harness": "Cabin Harness Pig Tail", "fuse": "F47"},
-    "Telematics": {"connector": "Cabin Interface Connector (Brown)", "location": "Behind dashboard, cabin side", "harness": "Cabin Harness Pig Tail", "fuse": "F47"},
-    "Instrument Cluster": {"connector": "89E", "location": "Dashboard behind cluster unit", "harness": "Cabin Harness", "fuse": "F46"},
-    "TCU": {"connector": "AMT Gearbox Inline Connector", "location": "Under chassis near gearbox", "harness": "AMT to Vehicle Wiring Harness", "fuse": "F43"},
-    "Gear Shift Lever": {"connector": "AMT Gear Shifter Inline Connector", "location": "Cabin floor, gear lever base", "harness": "AMT to Vehicle Wiring Harness", "fuse": "F43"},
-    "LNG Sensor 1": {"connector": "Rear Harness Inline", "location": "Left rear chassis, tank area", "harness": "Rear Chassis / Pig Tail", "fuse": "F52"},
-    "LNG Sensor 2": {"connector": "Pig Tail Tank Sensor", "location": "Right rear tank (if double tank)", "harness": "Pig Tail for Double Tank", "fuse": "F52"},
-    "Retarder Controller": {"connector": "Retarder Module Connector", "location": "Chassis, near prop shaft", "harness": "Retarder Wiring", "fuse": "F49"},
-}
-
-drawing_map = {
-    "Connector 3": "PEE0000014_K.pdf",
-    "Connector 4": "PEE0000014_K.pdf",
-    "F46": "PEE0000014_K.pdf",
-    "F47": "PEE0000014_K.pdf",
-    "F42": "PEE0000014_K.pdf",
-    "Cabin Harness": "PEE0000014_K.pdf",
-    "Rear Harness": "PEE0000083_A_01072024.pdf",
-    "Retarder Wiring": "PEE0000013_J_01072024.pdf",
-    "Pig Tail for Double Tank": "PEE0000083_A_01072024.pdf",
-    "Trailer Interface": "PEE0000084.pdf"
-}
-
-# -------------------------
-# Utility: PDF report generation
-# -------------------------
-def generate_pdf_buffer(report_data, vehicle_name):
-    buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
-    width, height = A4
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(50, height - 50, f"Diagnostic Report - {vehicle_name}")
-    c.setFont("Helvetica", 10)
-    c.drawString(50, height - 70, f"Generated on: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    y = height - 100
-    headers = ["ECU", "Source Addr", "Status", "Connector", "Location", "Fuse"]
-    col_widths = [130, 80, 80, 150, 150, 60]
-    for i, header in enumerate(headers):
-        c.setFillColor(colors.grey)
-        c.rect(50 + sum(col_widths[:i]), y, col_widths[i], 20, fill=1)
-        c.setFillColor(colors.white)
-        c.drawString(55 + sum(col_widths[:i]), y + 5, header)
-    y -= 20
-    for row in report_data:
-        if y < 50:
-            c.showPage()
-            y = height - 50
-        for i, key in enumerate(["ECU", "Source Address", "Status", "Connector", "Location", "Fuse"]):
-            c.setFillColor(colors.black)
-            c.drawString(55 + sum(col_widths[:i]), y, str(row.get(key, "-")))
-        y -= 18
-    c.save()
-    buffer.seek(0)
-    return buffer
-
-# -------------------------
-# Utility: .trc parser (extract IDs + payloads)
-# -------------------------
-def parse_trc_file(file_path: str) -> pd.DataFrame:
-    """
-    Parse .trc log into DataFrame with columns:
-    Timestamp, CAN ID (int), DLC, Data (bytes), Source Address (int)
-    """
-    records = []
-    try:
-        with open(file_path, "r", errors="ignore") as f:
-            for line in f:
-                # Primary pattern: "1)   0.000 Rx   18FECA17   8  00 FF FF 00 00 00 00 00"
-                m = re.match(r"\s*\d+\)\s+([\d.]+)\s+Rx\s+([0-9A-Fa-f]{6,8})\s+(\d+)\s+((?:[0-9A-Fa-f]{2}\s+)+)", line)
-                if m:
-                    ts = float(m.group(1))
-                    can_id = int(m.group(2), 16)
-                    dlc = int(m.group(3))
-                    data_str = m.group(4).strip()
-                    data_bytes = bytes(int(b, 16) for b in data_str.split()[:dlc])
-                    sa = can_id & 0xFF
-                    records.append({
-                        "Timestamp": ts,
-                        "CAN ID": can_id,
-                        "DLC": dlc,
-                        "Data": data_bytes,
-                        "Source Address": sa
-                    })
-                    continue
-                # Fallback pattern: "ID = 18FECA17 Len = 8 Data = 00 FF ..."
-                m2 = re.search(r"ID\s*=\s*([0-9A-Fa-f]{6,8}).*?Len\s*=\s*(\d+).*?Data\s*=\s*((?:[0-9A-Fa-f]{2}\s+)+)", line)
-                if m2:
-                    can_id = int(m2.group(1), 16)
-                    dlc = int(m2.group(2))
-                    data_str = m2.group(3).strip()
-                    data_bytes = bytes(int(b, 16) for b in data_str.split()[:dlc])
-                    sa = can_id & 0xFF
-                    records.append({
-                        "Timestamp": None,
-                        "CAN ID": can_id,
-                        "DLC": dlc,
-                        "Data": data_bytes,
-                        "Source Address": sa
-                    })
-    except Exception as e:
-        st.error(f"❌ Failed to parse .trc file: {e}")
-        return pd.DataFrame()
-    return pd.DataFrame(records)
-
-# -------------------------
-# J1939 / DM1 parsing (SPN/FMI extraction)
-# -------------------------
-DM1_PGN = 0xFECA  # 65226
-TP_CM_PGN = 0xEC00  # 60416 (TP.CM)
-TP_DT_PGN = 0xEB00  # 60160 (TP.DT)
+# =============================
+# ECU & Diagnostic Helpers
+# =============================
 
 def parse_dm1_frame_with_lamp(timestamp, can_id, data_bytes, dtc_lookup):
-    """
-    Parse a DM1 (PGN 65226 / 0xFECA) frame, including lamp status and multiple DTCs.
-    Returns a list of decoded DTC dictionaries.
-    """
+    """Parse a DM1 frame, including lamp status and DTCs."""
     results = []
     if len(data_bytes) < 8:
         return results
 
-    # -------------------------
-    # Lamp Status (Byte 0) + Flash Status (Byte 1)
-    # -------------------------
+    # Lamp Status Byte (Byte0) + Flash Status Byte (Byte1)
     lamp = {}
-
     def lamp_state(bits):
-        if bits == 0b00:
-            return False
-        elif bits in (0b01, 0b10):  # steady or flashing
-            return True
-        elif bits == 0b11:
-            return True  # Reserved -> treat as ON
+        if bits == 0b00: return False
+        elif bits in (0b01,0b10): return True
+        elif bits == 0b11: return True
         return False
-
     lb = data_bytes[0]
     lamp["MIL"] = lamp_state(lb & 0b11)
     lamp["RSL"] = lamp_state((lb >> 2) & 0b11)
     lamp["AWL"] = lamp_state((lb >> 4) & 0b11)
     lamp["PL"]  = lamp_state((lb >> 6) & 0b11)
 
-    # Flash status (Byte 1)
     if len(data_bytes) >= 2:
         fb = data_bytes[1]
         lamp["FlashMIL"] = ((fb & 0b11) != 0)
@@ -375,35 +188,22 @@ def parse_dm1_frame_with_lamp(timestamp, can_id, data_bytes, dtc_lookup):
         lamp["FlashAWL"] = (((fb >> 4) & 0b11) != 0)
         lamp["FlashPL"]  = (((fb >> 6) & 0b11) != 0)
 
-    # -------------------------
-    # Number of DTCs (Byte 2)
-    # -------------------------
     num_dtcs = data_bytes[2]
-
-    # -------------------------
-    # DTCs (from Byte 3 onward, 4 bytes each)
-    # -------------------------
     offset = 3
     for i in range(num_dtcs):
-        if offset + 4 > len(data_bytes):
-            break
-        b1, b2, b3, b4 = data_bytes[offset:offset + 4]
-
-        # Decode per J1939-73
-        spn = b1 | (b2 << 8) | ((b3 & 0xE0) << 11)
+        if offset + 4 > len(data_bytes): break
+        b1,b2,b3,b4 = data_bytes[offset:offset+4]
+        spn = b1 | (b2<<8) | ((b3 & 0xE0)<<11)
         fmi = b3 & 0x1F
-        oc  = b4 & 0x7F  # occurrence count
-
-        # Lookup description
+        oc = b4 & 0x7F
         desc = "Unknown (not in lookup)"
-        title, dtc_code, error_class = "", "", ""
-        if (spn, fmi) in dtc_lookup:
-            entry = dtc_lookup[(spn, fmi)]
-            desc = entry.get("Description", desc)
-            title = entry.get("Title", "")
-            dtc_code = entry.get("DTC", "")
-            error_class = entry.get("Error Class", "")
-
+        title,dtc_code,error_class = "","",""
+        if (spn,fmi) in dtc_lookup:
+            entry = dtc_lookup[(spn,fmi)]
+            desc = entry.get("Description",desc)
+            title = entry.get("Title","")
+            dtc_code = entry.get("DTC","")
+            error_class = entry.get("Error Class","")
         results.append({
             "Time": timestamp,
             "Source Address": f"0x{can_id & 0xFF:02X}",
@@ -415,19 +215,18 @@ def parse_dm1_frame_with_lamp(timestamp, can_id, data_bytes, dtc_lookup):
             "Title": title,
             "Description": desc,
             "Error Class": error_class,
-            "MIL": lamp.get("MIL", False),
-            "RSL": lamp.get("RSL", False),
-            "AWL": lamp.get("AWL", False),
-            "PL": lamp.get("PL", False),
-            "FlashMIL": lamp.get("FlashMIL", False),
-            "FlashRSL": lamp.get("FlashRSL", False),
-            "FlashAWL": lamp.get("FlashAWL", False),
-            "FlashPL": lamp.get("FlashPL", False),
+            "MIL": lamp.get("MIL",False),
+            "RSL": lamp.get("RSL",False),
+            "AWL": lamp.get("AWL",False),
+            "PL": lamp.get("PL",False),
+            "FlashMIL": lamp.get("FlashMIL",False),
+            "FlashRSL": lamp.get("FlashRSL",False),
+            "FlashAWL": lamp.get("FlashAWL",False),
+            "FlashPL": lamp.get("FlashPL",False)
         })
-
         offset += 4
-
     return results
+
 
 
 # -------------------------
@@ -946,4 +745,5 @@ st.markdown(
     </div>
     """, unsafe_allow_html=True
 )
+
 
