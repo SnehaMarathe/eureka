@@ -1,4 +1,4 @@
-# app.py — EurekaCheck Unified Diagnostic Tool (merged)
+# app.py — EurekaCheck Unified Diagnostic Tool (with upgraded DM1 parser)
 import streamlit as st
 from streamlit_javascript import st_javascript
 import re
@@ -38,7 +38,7 @@ st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
 EXCEL_DTC_PATH = "F300G810_FnR_T222BECDG8100033206_Trimmed_Signed.xlsx"
 EXCEL_SHEET = "Sheet1"
 EXCEL_HEADER_ROW = 3
-JSON_LOOKUP_PATH = "dtc_lookup_from_excel.json"
+JSON_LOOKUP_PATH = "dtc_lookup_merged.json"  # merged Excel+PDF JSON we created earlier
 
 # -------------------------
 # Helper: Browser-based location (via JS)
@@ -286,6 +286,10 @@ def generate_pdf_buffer(report_data, vehicle_name):
 # Utility: .trc parser (extract IDs + payloads)
 # -------------------------
 def parse_trc_file(file_path: str) -> pd.DataFrame:
+    """
+    Parse .trc log into DataFrame with columns:
+    Timestamp, CAN ID (int), DLC, Data (bytes), Source Address (int)
+    """
     records = []
     try:
         with open(file_path, "r", errors="ignore") as f:
@@ -332,57 +336,67 @@ def parse_trc_file(file_path: str) -> pd.DataFrame:
 # -------------------------
 DM1_PGN = 0xFECA  # 65226
 
+def decode_dtc_4bytes(b1, b2, b3, b4):
+    """Convert 4 bytes to SPN, FMI, OC using J1939 layout."""
+    spn = int(b1) | (int(b2) << 8) | ((int(b3) & 0x07) << 16)   # 19-bit SPN
+    fmi = (int(b3) >> 3) & 0x1F                                  # 5-bit FMI
+    oc = int(b4)
+    return spn, fmi, oc
+
 def parse_dm1_frame(data_bytes: bytes):
     """
-    Parse DM1 payload: 8 lamp bytes, followed by zero or more 4-byte DTC entries.
-    Each DTC: 19-bit SPN (b1 + top 3 bits of b2 + b3), 5-bit FMI (low 5 bits of b2), 8-bit OC (b4)
+    Robust DM1 parser:
+    - We scan offsets 1..len-4 looking for 4-byte DTC entries (keeps spn>0).
+    - This makes the parser tolerant to slight format differences in logs.
+    Returns list of dicts: {SPN, FMI, OC}
     """
     dtcs = []
-    if not data_bytes or len(data_bytes) < 8:
+    if not data_bytes or len(data_bytes) < 4:
         return dtcs
-    i = 8
-    while i + 3 < len(data_bytes):
-        b1, b2, b3, b4 = data_bytes[i:i+4]
-        spn = b1 | ((b2 & 0xE0) << 3) | (b3 << 11)
-        fmi = b2 & 0x1F
-        oc = b4
-        # ignore pad zeros
-        if spn == 0 and fmi == 0 and oc == 0:
-            break
-        dtcs.append({"SPN": spn, "FMI": fmi, "OC": oc})
-        i += 4
-    return dtcs
+
+    # Typical DM1 places a lamp byte at index 0; DTCs usually start at index 1.
+    # We'll slide a 4-byte window across offsets 1..len-4 and accept entries where SPN > 0.
+    for offset in range(1, max(1, len(data_bytes) - 3)):
+        if offset + 4 <= len(data_bytes):
+            b1, b2, b3, b4 = data_bytes[offset:offset+4]
+            spn, fmi, oc = decode_dtc_4bytes(b1, b2, b3, b4)
+            if spn > 0 and 0 <= fmi <= 31:
+                dtcs.append({"SPN": spn, "FMI": fmi, "OC": oc, "offset": offset})
+    # Remove duplicates preserving first occurrence
+    unique = {}
+    for d in dtcs:
+        key = (d["SPN"], d["FMI"])
+        if key not in unique or d["OC"] > unique[key]["OC"]:
+            unique[key] = d
+    return list(unique.values())
 
 # -------------------------
-# DTC lookup loader (Excel -> JSON cache)
+# DTC lookup loader (merged JSON preferred, fallback to Excel)
 # -------------------------
 @st.cache_resource
 def load_dtc_lookup(excel_path: str = EXCEL_DTC_PATH,
                     sheet: str = EXCEL_SHEET,
                     header_row: int = EXCEL_HEADER_ROW,
                     json_cache: str = JSON_LOOKUP_PATH):
-    # Prefer JSON cache for speed
+    # Prefer JSON cache for speed (merged from Excel + PDF)
     if json_cache and os.path.exists(json_cache):
         try:
             with open(json_cache, "r", encoding="utf-8") as f:
                 cached = json.load(f)
-            # cached is list of entries -> build dict keyed by (SPN,FMI)
             return {(int(x["SPN"]), int(x["FMI"])): x for x in cached}
         except Exception:
-            # fallback to building from Excel
             pass
 
-    # Build from Excel
+    # Build from Excel (fallback)
     try:
         df = pd.read_excel(excel_path, sheet_name=sheet, header=header_row)
     except Exception as e:
         st.warning(f"⚠️ Could not open Excel '{excel_path}': {e}")
         return {}
 
-    # find the SPN-FMI column (case-insensitive)
     col_spn_fmi = next((c for c in df.columns if str(c).strip().upper() == 'DTC SAE (SPN-FMI)'), None)
     if not col_spn_fmi:
-        # try fuzzy match
+        # fuzzy fallback
         for c in df.columns:
             if "SPN" in str(c).upper() and "FMI" in str(c).upper():
                 col_spn_fmi = c
@@ -412,7 +426,6 @@ def load_dtc_lookup(excel_path: str = EXCEL_DTC_PATH,
             "System Reaction": row.get("System Reaction", ""),
             "Error Class": row.get("Error Class", "")
         }
-        # make human-friendly description
         bits = []
         for k in ("Title", "Name", "Component", "Fid Description", "System Reaction"):
             v = entry.get(k)
@@ -421,7 +434,7 @@ def load_dtc_lookup(excel_path: str = EXCEL_DTC_PATH,
         entry["Description"] = " | ".join(bits) if bits else ""
         lookup[(spn, fmi)] = entry
 
-    # persist JSON cache
+    # attempt to persist JSON cache for next runs
     try:
         with open(json_cache, "w", encoding="utf-8") as f:
             json.dump(list(lookup.values()), f, indent=2, ensure_ascii=False)
@@ -433,7 +446,7 @@ def load_dtc_lookup(excel_path: str = EXCEL_DTC_PATH,
 DTC_LOOKUP = load_dtc_lookup()
 
 # -------------------------
-# DTC decode routine
+# DTC decode routine (applies lookup)
 # -------------------------
 def decode_dtcs_from_df(df: pd.DataFrame) -> pd.DataFrame:
     rows = []
@@ -604,7 +617,6 @@ if bus:
     while time.time() - start_time < 5:
         msg = bus.recv(1)
         if msg:
-            # store arbitration_id and data (if present)
             data_bytes = msg.data if hasattr(msg, "data") else b""
             live_data.append({"Timestamp": None, "CAN ID": msg.arbitration_id, "DLC": msg.dlc if hasattr(msg, "dlc") else len(data_bytes), "Data": data_bytes, "Source Address": msg.arbitration_id & 0xFF})
     if live_data:
@@ -612,19 +624,17 @@ if bus:
         st.success(f"✅ Captured {len(live_data)} messages from PCAN.")
 
 # -------------------------
-# Build ECU presence report & harness analysis
+# Build ECU presence report & harness analysis & DTCs
 # -------------------------
 if not vehicle_name.strip():
     st.info("📂 Please enter a vehicle name to run diagnostics.")
 else:
-    # Build ECU report from df_can
     report = []
     found_sources = set()
     if not df_can.empty and "Source Address" in df_can.columns:
         try:
             found_sources = {int(x) for x in df_can["Source Address"].astype(int).tolist()}
         except Exception:
-            # fallback, attempt conversion
             try:
                 found_sources = {int(str(x), 16) if isinstance(x, str) and re.fullmatch(r"[0-9A-Fa-f]+", str(x)) else int(x) for x in df_can["Source Address"].tolist() if str(x) != "nan"}
             except Exception:
@@ -651,7 +661,7 @@ else:
     df_report = pd.DataFrame(report)
 
     if not df_report.empty:
-        # Log to Firebase (non-blocking)
+        # Log to Firebase
         try:
             log_to_firebase(vehicle_name, df_report)
         except Exception:
@@ -661,7 +671,7 @@ else:
         st.subheader("📋 ECU Status")
         st.dataframe(df_report, use_container_width=True)
 
-        # Root Cause Analysis (Harness / Fuse / Connector)
+        # Root Cause Analysis
         st.subheader("🧠 Root Cause Analysis")
         root_causes = infer_root_causes(df_report)
         if root_causes:
@@ -685,10 +695,9 @@ else:
         for _, row in df_report[df_report["Status"] == "❌ MISSING"].iterrows():
             st.markdown(generate_detailed_diagnosis(row["ECU"]), unsafe_allow_html=True)
 
-        # Diagnostic Visual Reference (slides)
+        # Visual Reference slides
         st.markdown("---")
         st.markdown("### 🖼️ Diagnostic Visual Reference")
-
         slide_map = {
             "Connector 3": [12],
             "Connector 4": [3],
