@@ -338,89 +338,97 @@ DM1_PGN = 0xFECA  # 65226
 TP_CM_PGN = 0xEC00  # 60416 (TP.CM)
 TP_DT_PGN = 0xEB00  # 60160 (TP.DT)
 
-def parse_dm1_frame_with_lamp(data_bytes: bytes):
+def parse_dm1_frame_with_lamp(timestamp, can_id, data_bytes, dtc_lookup):
     """
-    Parse DM1 payload strictly according to SAE J1939-73 (Version 4 layout).
-    - Byte 1 (index 0): Lamp status (2-bit fields for MIL, RSL, AWL, PL)
-    - Byte 2 (index 1): Flash bits (not required for DTC decoding but captured)
-    - Subsequent bytes: DTCs in 4-byte blocks:
-        Byte3 (index2): SPN low 8 bits
-        Byte4 (index3): SPN mid 8 bits
-        Byte5 (index4): SPN high 3 bits (bits 7-5) + FMI (bits 4-0)
-        Byte6 (index5): CM (bit7) + Occurrence Count (bits6-0)
-      Repeat each 4-byte DTC block for additional DTCs.
-    This approach uses the DTC count derived from payload length:
-        dtc_count = floor((len(data) - 2) / 4)
-    Returns: lamp_dict, list_of_dtcs
+    Parse a DM1 (PGN 65226 / 0xFECA) frame, including lamp status and multiple DTCs.
+    Returns a list of decoded DTC dictionaries.
     """
-    lamp = {"MIL": None, "RSL": None, "AWL": None, "PL": None, "FlashMIL": None, "FlashRSL": None, "FlashAWL": None, "FlashPL": None}
-    dtcs = []
+    results = []
+    if len(data_bytes) < 8:
+        return results
 
-    if not data_bytes or len(data_bytes) < 1:
-        return lamp, dtcs
+    # -------------------------
+    # Lamp Status (Byte 0) + Flash Status (Byte 1)
+    # -------------------------
+    lamp = {}
 
-    # Lamp byte (Byte1)
+    def lamp_state(bits):
+        if bits == 0b00:
+            return False
+        elif bits in (0b01, 0b10):  # steady or flashing
+            return True
+        elif bits == 0b11:
+            return True  # Reserved -> treat as ON
+        return False
+
     lb = data_bytes[0]
-    def twobit(val, shift):
-        return (val >> shift) & 0x03
-    try:
-        mil_state = twobit(lb, 0)
-        rsl_state = twobit(lb, 2)
-        awl_state = twobit(lb, 4)
-        pl_state = twobit(lb, 6)
-        lamp["MIL"] = (mil_state == 1)
-        lamp["RSL"] = (rsl_state == 1)
-        lamp["AWL"] = (awl_state == 1)
-        lamp["PL"] = (pl_state == 1)
-    except Exception:
-        lamp["MIL"] = lamp["RSL"] = lamp["AWL"] = lamp["PL"] = None
+    lamp["MIL"] = lamp_state(lb & 0b11)
+    lamp["RSL"] = lamp_state((lb >> 2) & 0b11)
+    lamp["AWL"] = lamp_state((lb >> 4) & 0b11)
+    lamp["PL"]  = lamp_state((lb >> 6) & 0b11)
 
-    # Flash byte (Byte2) - optional / informational
+    # Flash status (Byte 1)
     if len(data_bytes) >= 2:
         fb = data_bytes[1]
-        lamp["FlashMIL"] = ((fb >> 0) & 0x03) == 1
-        lamp["FlashRSL"] = ((fb >> 2) & 0x03) == 1
-        lamp["FlashAWL"] = ((fb >> 4) & 0x03) == 1
-        lamp["FlashPL"]  = ((fb >> 6) & 0x03) == 1
+        lamp["FlashMIL"] = ((fb & 0b11) != 0)
+        lamp["FlashRSL"] = (((fb >> 2) & 0b11) != 0)
+        lamp["FlashAWL"] = (((fb >> 4) & 0b11) != 0)
+        lamp["FlashPL"]  = (((fb >> 6) & 0b11) != 0)
 
-    # Determine how many DTC blocks exist (each DTC = 4 bytes per J1939-73)
-    if len(data_bytes) <= 2:
-        return lamp, dtcs
+    # -------------------------
+    # Number of DTCs (Byte 2)
+    # -------------------------
+    num_dtcs = data_bytes[2]
 
-    available = len(data_bytes) - 2
-    dtc_count = available // 4
-
-    for i in range(dtc_count):
-        offset = 2 + i * 4
-        if offset + 3 >= len(data_bytes):
+    # -------------------------
+    # DTCs (from Byte 3 onward, 4 bytes each)
+    # -------------------------
+    offset = 3
+    for i in range(num_dtcs):
+        if offset + 4 > len(data_bytes):
             break
-        b1 = data_bytes[offset]       # SPN low 8
-        b2 = data_bytes[offset + 1]   # SPN next 8
-        b3 = data_bytes[offset + 2]   # SPN high 3 bits + FMI (low 5 bits)
-        b4 = data_bytes[offset + 3]   # CM (bit7) + OC (bits6..0)
+        b1, b2, b3, b4 = data_bytes[offset:offset + 4]
 
-        # SPN calculation (J1939-73): SPN = b1 + (b2 << 8) + ((b3 & 0xE0) << 11)
-        spn = int(b1) | (int(b2) << 8) | ((int(b3) & 0xE0) << 11)
-        # FMI is low 5 bits of b3
-        fmi = int(b3) & 0x1F
-        # Conversion method bit (top bit of b4)
-        cm = (int(b4) & 0x80) >> 7
-        # Occurrence Count is lower 7 bits
-        oc = int(b4) & 0x7F
+        # Decode per J1939-73
+        spn = b1 | (b2 << 8) | ((b3 & 0xE0) << 11)
+        fmi = b3 & 0x1F
+        oc  = b4 & 0x7F  # occurrence count
 
-        # If all zero -> no DTC present for this slot (spec says first DTC all-zero when none)
-        if spn == 0 and fmi == 0 and oc == 0:
-            continue
+        # Lookup description
+        desc = "Unknown (not in lookup)"
+        title, dtc_code, error_class = "", "", ""
+        if (spn, fmi) in dtc_lookup:
+            entry = dtc_lookup[(spn, fmi)]
+            desc = entry.get("Description", desc)
+            title = entry.get("Title", "")
+            dtc_code = entry.get("DTC", "")
+            error_class = entry.get("Error Class", "")
 
-        dtcs.append({
+        results.append({
+            "Time": timestamp,
+            "Source Address": f"0x{can_id & 0xFF:02X}",
+            "Assembled": True,
             "SPN": spn,
             "FMI": fmi,
             "OC": oc,
-            "CM": cm,
-            "offset": offset
+            "DTC": dtc_code,
+            "Title": title,
+            "Description": desc,
+            "Error Class": error_class,
+            "MIL": lamp.get("MIL", False),
+            "RSL": lamp.get("RSL", False),
+            "AWL": lamp.get("AWL", False),
+            "PL": lamp.get("PL", False),
+            "FlashMIL": lamp.get("FlashMIL", False),
+            "FlashRSL": lamp.get("FlashRSL", False),
+            "FlashAWL": lamp.get("FlashAWL", False),
+            "FlashPL": lamp.get("FlashPL", False),
         })
 
-    return lamp, dtcs
+        offset += 4
+
+    return results
+
 
 # -------------------------
 # TP/BAM assembler (unchanged)
@@ -938,3 +946,4 @@ st.markdown(
     </div>
     """, unsafe_allow_html=True
 )
+
