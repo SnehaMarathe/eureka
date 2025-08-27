@@ -38,7 +38,7 @@ st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
 EXCEL_DTC_PATH = "F300G810_FnR_T222BECDG8100033206_Trimmed_Signed.xlsx"
 EXCEL_SHEET = "Sheet1"
 EXCEL_HEADER_ROW = 3
-JSON_LOOKUP_PATH = "dtc_lookup_merged.json"  # merged Excel+PDF JSON we created earlier
+JSON_LOOKUP_PATH = "dtc_lookup_engine_abs_full.json"  # merged Excel+PDF JSON we created earlier
 
 # -------------------------
 # Helper: Browser-based location (via JS)
@@ -938,3 +938,4 @@ st.markdown(
     </div>
     """, unsafe_allow_html=True
 )
+
