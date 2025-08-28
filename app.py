@@ -510,32 +510,89 @@ def merge_assembled_into_df(df_can: pd.DataFrame, assembled_msgs: list):
         combined = combined.sort_values(by=["Timestamp"], na_position="last").reset_index(drop=True)
     return combined
 
-# -------------------------
-# DTC lookup loader (merged JSON preferred, fallback to Excel)
-# -------------------------
 @st.cache_resource
 def load_dtc_lookup(excel_path: str = EXCEL_DTC_PATH,
                     sheet: str = EXCEL_SHEET,
                     header_row: int = EXCEL_HEADER_ROW,
                     json_cache: str = JSON_LOOKUP_PATH):
+    def _safe_int(x):
+        try:
+            if x is None or (isinstance(x, float) and pd.isna(x)):
+                return None
+            return int(str(x).strip())
+        except Exception:
+            return None
+
+    # 1) Try JSON first (robustly)
     if json_cache and os.path.exists(json_cache):
         try:
             with open(json_cache, "r", encoding="utf-8") as f:
-                cached = json.load(f)
-            return {(int(x["SPN"]), int(x["FMI"])): x for x in cached}
-        except Exception:
-            pass
+                items = json.load(f)
+            if not isinstance(items, list):
+                st.warning(f"⚠️ JSON lookup must be a list, got {type(items)} — falling back to Excel.")
+                raise ValueError("JSON is not a list")
 
+            lookup = {}
+            skipped = 0
+            for x in items:
+                # Accept both hybrid entries and old flat entries
+                spn = _safe_int(x.get("SPN"))
+                fmi = _safe_int(x.get("FMI"))
+                if spn is None or fmi is None:
+                    skipped += 1
+                    continue
+
+                # Core fields
+                name = x.get("Name") or ""
+                title = x.get("Title") or ""
+                component = x.get("Component") or ""
+                dtc = x.get("DTC") or ""
+
+                # Prefer provided description; else build one
+                desc = x.get("Description")
+                if not desc:
+                    parts = [p for p in [title, name, component] if p]
+                    desc = " | ".join(parts)
+
+                # Optional fields your downstream code may display
+                entry = {
+                    "SPN": spn,
+                    "FMI": fmi,
+                    "DTC": dtc,
+                    "Name": name,
+                    "Title": title,
+                    "Component": component,
+                    "Fid Name": x.get("Fid Name", ""),              # if present in old engine JSON
+                    "Fid Description": x.get("Fid Description", ""),
+                    "System Reaction": x.get("System Reaction", ""),
+                    "Error Class": x.get("Error Class", ""),
+                    "Description": desc,
+                    # keep source-specific payload around (not required by the UI)
+                    "Source": x.get("Source", ""),
+                    "Extra": x.get("Extra", {}),
+                }
+
+                lookup[(spn, fmi)] = entry
+
+            st.info(f"📚 Loaded {len(lookup)} DTC entries from JSON (skipped {skipped} records without SPN/FMI).")
+            return lookup
+
+        except Exception as e:
+            st.warning(f"⚠️ JSON lookup read failed ('{json_cache}'): {e}. Falling back to Excel…")
+
+    # 2) Fallback: Excel (your original logic, lightly hardened)
     try:
         df = pd.read_excel(excel_path, sheet_name=sheet, header=header_row)
     except Exception as e:
         st.warning(f"⚠️ Could not open Excel '{excel_path}': {e}")
         return {}
 
+    # Try to find the SPN-FMI column
     col_spn_fmi = next((c for c in df.columns if str(c).strip().upper() == 'DTC SAE (SPN-FMI)'), None)
     if not col_spn_fmi:
         for c in df.columns:
-            if "SPN" in str(c).upper() and "FMI" in str(c).upper():
+            cu = str(c).upper()
+            if "SPN" in cu and "FMI" in cu:
                 col_spn_fmi = c
                 break
     if not col_spn_fmi:
@@ -550,18 +607,21 @@ def load_dtc_lookup(excel_path: str = EXCEL_DTC_PATH,
         m = re.search(r'(\d+)\s*[-/,\s]\s*(\d+)', str(sf))
         if not m:
             continue
-        spn, fmi = int(m.group(1)), int(m.group(2))
+        spn, fmi = _safe_int(m.group(1)), _safe_int(m.group(2))
+        if spn is None or fmi is None:
+            continue
+
         entry = {
             "SPN": spn,
             "FMI": fmi,
-            "DTC": row.get("DTC", ""),
-            "Name": row.get("Name", ""),
-            "Title": row.get("Title", ""),
-            "Component": row.get("Component", ""),
-            "Fid Name": row.get("Fid Name", ""),
-            "Fid Description": row.get("Fid Description", ""),
-            "System Reaction": row.get("System Reaction", ""),
-            "Error Class": row.get("Error Class", "")
+            "DTC": row.get("DTC", "") or "",
+            "Name": row.get("Name", "") or "",
+            "Title": row.get("Title", "") or "",
+            "Component": row.get("Component", "") or "",
+            "Fid Name": row.get("Fid Name", "") or "",
+            "Fid Description": row.get("Fid Description", "") or "",
+            "System Reaction": row.get("System Reaction", "") or "",
+            "Error Class": row.get("Error Class", "") or "",
         }
         bits = []
         for k in ("Title", "Name", "Component", "Fid Description", "System Reaction"):
@@ -571,12 +631,14 @@ def load_dtc_lookup(excel_path: str = EXCEL_DTC_PATH,
         entry["Description"] = " | ".join(bits) if bits else ""
         lookup[(spn, fmi)] = entry
 
+    # Cache the normalized list form so next runs use JSON fast-path
     try:
         with open(json_cache, "w", encoding="utf-8") as f:
             json.dump(list(lookup.values()), f, indent=2, ensure_ascii=False)
     except Exception:
         pass
 
+    st.info(f"📄 Built {len(lookup)} DTC entries from Excel and cached to JSON.")
     return lookup
 
 DTC_LOOKUP = load_dtc_lookup()
@@ -938,4 +1000,3 @@ st.markdown(
     </div>
     """, unsafe_allow_html=True
 )
-
