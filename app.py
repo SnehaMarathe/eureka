@@ -38,14 +38,17 @@ st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
 EXCEL_DTC_PATH = "F300G810_FnR_T222BECDG8100033206_Trimmed_Signed.xlsx"
 EXCEL_SHEET = "Sheet1"
 EXCEL_HEADER_ROW = 3
-JSON_LOOKUP_PATH = "dtc_lookup_engine_abs_full.json"  # merged Excel+PDF JSON we created earlier
+JSON_LOOKUP_PATH = "dtc_lookup_engine_abs_full.json"  # updated merged JSON (with WorkshopActions)
 
 # -------------------------
 # Helper: Browser-based location (via JS)
 # -------------------------
 def capture_browser_location():
     try:
-        ip = st_javascript("await fetch('https://api64.ipify.org?format=json').then(r => r.json()).then(data => data.ip)")
+        ip = st_javascript(
+            "await fetch('https://api64.ipify.org?format=json')"
+            ".then(r => r.json()).then(data => data.ip)"
+        )
     except Exception:
         ip = None
     if ip:
@@ -408,7 +411,7 @@ def parse_dm1_frame_with_lamp(data_bytes: bytes):
         # Occurrence Count is lower 7 bits
         oc = int(b4) & 0x7F
 
-        # If all zero -> no DTC present for this slot (spec says first DTC all-zero when none)
+        # If all zero -> no DTC present for this slot
         if spn == 0 and fmi == 0 and oc == 0:
             continue
 
@@ -423,7 +426,7 @@ def parse_dm1_frame_with_lamp(data_bytes: bytes):
     return lamp, dtcs
 
 # -------------------------
-# TP/BAM assembler (unchanged)
+# TP/BAM assembler
 # -------------------------
 def assemble_tp_bam(df: pd.DataFrame):
     assembled = []
@@ -510,6 +513,9 @@ def merge_assembled_into_df(df_can: pd.DataFrame, assembled_msgs: list):
         combined = combined.sort_values(by=["Timestamp"], na_position="last").reset_index(drop=True)
     return combined
 
+# -------------------------
+# Lookup loader (JSON first, Excel fallback), preserving WorkshopActions
+# -------------------------
 @st.cache_resource
 def load_dtc_lookup(excel_path: str = EXCEL_DTC_PATH,
                     sheet: str = EXCEL_SHEET,
@@ -523,7 +529,7 @@ def load_dtc_lookup(excel_path: str = EXCEL_DTC_PATH,
         except Exception:
             return None
 
-    # 1) Try JSON first (robustly)
+    # JSON fast-path
     if json_cache and os.path.exists(json_cache):
         try:
             with open(json_cache, "r", encoding="utf-8") as f:
@@ -535,26 +541,22 @@ def load_dtc_lookup(excel_path: str = EXCEL_DTC_PATH,
             lookup = {}
             skipped = 0
             for x in items:
-                # Accept both hybrid entries and old flat entries
                 spn = _safe_int(x.get("SPN"))
                 fmi = _safe_int(x.get("FMI"))
                 if spn is None or fmi is None:
                     skipped += 1
                     continue
 
-                # Core fields
                 name = x.get("Name") or ""
                 title = x.get("Title") or ""
                 component = x.get("Component") or ""
                 dtc = x.get("DTC") or ""
 
-                # Prefer provided description; else build one
                 desc = x.get("Description")
                 if not desc:
                     parts = [p for p in [title, name, component] if p]
                     desc = " | ".join(parts)
 
-                # Optional fields your downstream code may display
                 entry = {
                     "SPN": spn,
                     "FMI": fmi,
@@ -562,25 +564,29 @@ def load_dtc_lookup(excel_path: str = EXCEL_DTC_PATH,
                     "Name": name,
                     "Title": title,
                     "Component": component,
-                    "Fid Name": x.get("Fid Name", ""),              # if present in old engine JSON
-                    "Fid Description": x.get("Fid Description", ""),
-                    "System Reaction": x.get("System Reaction", ""),
-                    "Error Class": x.get("Error Class", ""),
                     "Description": desc,
-                    # keep source-specific payload around (not required by the UI)
+                    "Error Class": x.get("Error Class", ""),
                     "Source": x.get("Source", ""),
                     "Extra": x.get("Extra", {}),
+                    # keep unified WorkshopActions
+                    "WorkshopActions": x.get("WorkshopActions", None),
                 }
+                # Fallback if ABS-only "WorkshopAction" is inside Extra
+                if not entry["WorkshopActions"]:
+                    extra = entry.get("Extra") or {}
+                    wa = extra.get("WorkshopAction")
+                    if wa:
+                        entry["WorkshopActions"] = [wa] if isinstance(wa, str) else wa
 
                 lookup[(spn, fmi)] = entry
 
-            st.info(f"📚 Loaded {len(lookup)} DTC entries from JSON (skipped {skipped} records without SPN/FMI).")
+            st.info(f"📚 Loaded {len(lookup)} DTC entries from JSON (skipped {skipped} without SPN/FMI).")
             return lookup
 
         except Exception as e:
             st.warning(f"⚠️ JSON lookup read failed ('{json_cache}'): {e}. Falling back to Excel…")
 
-    # 2) Fallback: Excel (your original logic, lightly hardened)
+    # Excel fallback (minimal)
     try:
         df = pd.read_excel(excel_path, sheet_name=sheet, header=header_row)
     except Exception as e:
@@ -607,7 +613,8 @@ def load_dtc_lookup(excel_path: str = EXCEL_DTC_PATH,
         m = re.search(r'(\d+)\s*[-/,\s]\s*(\d+)', str(sf))
         if not m:
             continue
-        spn, fmi = _safe_int(m.group(1)), _safe_int(m.group(2))
+        spn = _safe_int(m.group(1))
+        fmi = _safe_int(m.group(2))
         if spn is None or fmi is None:
             continue
 
@@ -618,30 +625,39 @@ def load_dtc_lookup(excel_path: str = EXCEL_DTC_PATH,
             "Name": row.get("Name", "") or "",
             "Title": row.get("Title", "") or "",
             "Component": row.get("Component", "") or "",
-            "Fid Name": row.get("Fid Name", "") or "",
-            "Fid Description": row.get("Fid Description", "") or "",
-            "System Reaction": row.get("System Reaction", "") or "",
+            "Description": "",
             "Error Class": row.get("Error Class", "") or "",
+            "Source": "ExcelFallback",
+            "Extra": {},
+            "WorkshopActions": None,
         }
-        bits = []
-        for k in ("Title", "Name", "Component", "Fid Description", "System Reaction"):
-            v = entry.get(k)
-            if v and str(v) != "nan":
-                bits.append(str(v))
-        entry["Description"] = " | ".join(bits) if bits else ""
+        parts = [p for p in [entry["Title"], entry["Name"], entry["Component"]] if p and str(p) != "nan"]
+        entry["Description"] = " | ".join(parts) if parts else ""
         lookup[(spn, fmi)] = entry
 
-    # Cache the normalized list form so next runs use JSON fast-path
-    try:
-        with open(json_cache, "w", encoding="utf-8") as f:
-            json.dump(list(lookup.values()), f, indent=2, ensure_ascii=False)
-    except Exception:
-        pass
-
-    st.info(f"📄 Built {len(lookup)} DTC entries from Excel and cached to JSON.")
+    st.info(f"📄 Built {len(lookup)} DTC entries from Excel.")
     return lookup
 
 DTC_LOOKUP = load_dtc_lookup()
+
+# -------------------------
+# Helper: format WorkshopActions for the table
+# -------------------------
+def _format_workshop_actions(entry: dict) -> str:
+    if not entry:
+        return ""
+    wa = entry.get("WorkshopActions")
+    if isinstance(wa, list):
+        wa = [s for s in wa if s and str(s).strip()]
+        return "\n• " + "\n• ".join(wa) if wa else ""
+    if isinstance(wa, str):
+        s = wa.strip()
+        return s if s else ""
+    extra = entry.get("Extra") or {}
+    wa2 = extra.get("WorkshopAction")
+    if isinstance(wa2, str) and wa2.strip():
+        return wa2.strip()
+    return ""
 
 # -------------------------
 # DTC decode routine (applies lookup)
@@ -679,6 +695,7 @@ def decode_dtcs_from_df(df: pd.DataFrame) -> pd.DataFrame:
                 "Title": entry.get("Title", "") or entry.get("Name", ""),
                 "Description": entry.get("Description", "Unknown (not in lookup)"),
                 "Error Class": entry.get("Error Class", ""),
+                "Workshop Actions": _format_workshop_actions(entry),  # NEW column
                 "MIL": lamp.get("MIL"),
                 "RSL": lamp.get("RSL"),
                 "AWL": lamp.get("AWL"),
@@ -698,6 +715,7 @@ def decode_dtcs_from_df(df: pd.DataFrame) -> pd.DataFrame:
                 "Title": "",
                 "Description": "No SPN/FMI present in payload — MIL ON",
                 "Error Class": "",
+                "Workshop Actions": "",
                 "MIL": lamp.get("MIL"),
                 "RSL": lamp.get("RSL"),
                 "AWL": lamp.get("AWL"),
@@ -807,6 +825,12 @@ has_double_tank = st.checkbox("Has Double Tank?", value=True)
 has_amt = st.checkbox("Has AMT?", value=True)
 has_retarder = st.checkbox("Has Retarder?", value=True)
 
+# Convenience: reload lookup after swapping JSON file
+if st.button("🔄 Reload DTC Lookup (clear cache)"):
+    load_dtc_lookup.clear()
+    DTC_LOOKUP = load_dtc_lookup()
+    st.success("Lookup cache cleared and reloaded.")
+
 # -------------------------
 # CAN Data Input
 # -------------------------
@@ -847,147 +871,166 @@ if bus:
         msg = bus.recv(1)
         if msg:
             data_bytes = msg.data if hasattr(msg, "data") else b""
-            live_data.append({"Timestamp": None, "CAN ID": msg.arbitration_id, "DLC": msg.dlc if hasattr(msg, "dlc") else len(data_bytes), "Data": data_bytes, "Source Address": msg.arbitration_id & 0xFF})
+            live_data.append({
+                "Timestamp": None,
+                "CAN ID": msg.arbitration_id,
+                "DLC": msg.dlc if hasattr(msg, "dlc") else len(data_bytes),
+                "Data": data_bytes,
+                "Source Address": msg.arbitration_id & 0xFF
+            })
     if live_data:
         df_can = pd.DataFrame(live_data)
         st.success(f"✅ Captured {len(live_data)} messages from PCAN.")
 
 # -------------------------
+# GATE: Require CAN data before any analysis
+# -------------------------
+has_data = not df_can.empty
+if not has_data:
+    st.info("📂 Upload a .trc file or connect to live PCAN to start analysis.")
+    st.stop()
+
+# -------------------------
 # Build ECU presence report & harness analysis & DTCs
 # -------------------------
 if not vehicle_name.strip():
-    st.info("📂 Please enter a vehicle name to run diagnostics.")
-else:
-    report = []
-    found_sources = set()
-    if not df_can.empty and "Source Address" in df_can.columns:
+    st.info("📝 Please enter a vehicle name to run diagnostics.")
+    st.stop()
+
+report = []
+found_sources = set()
+if not df_can.empty and "Source Address" in df_can.columns:
+    try:
+        found_sources = {int(x) for x in df_can["Source Address"].astype(int).tolist()}
+    except Exception:
         try:
-            found_sources = {int(x) for x in df_can["Source Address"].astype(int).tolist()}
+            found_sources = {
+                int(str(x), 16) if isinstance(x, str) and re.fullmatch(r"[0-9A-Fa-f]+", str(x))
+                else int(x)
+                for x in df_can["Source Address"].tolist() if str(x) != "nan"
+            }
         except Exception:
-            try:
-                found_sources = {int(str(x), 16) if isinstance(x, str) and re.fullmatch(r"[0-9A-Fa-f]+", str(x)) else int(x) for x in df_can["Source Address"].tolist() if str(x) != "nan"}
-            except Exception:
-                found_sources = set()
+            found_sources = set()
 
-    for addr, ecu in ecu_map.items():
-        if ecu == "LNG Sensor 2" and not has_double_tank:
-            continue
-        if ecu in ["TCU", "Gear Shift Lever"] and not has_amt:
-            continue
-        if ecu == "Retarder Controller" and not has_retarder:
-            continue
-        status = "✅ OK" if addr in found_sources else "❌ MISSING"
-        conn = ecu_connector_map.get(ecu, {})
-        report.append({
-            "ECU": ecu,
-            "Source Address": f"0x{addr:02X}",
-            "Status": status,
-            "Connector": conn.get("connector", "-"),
-            "Location": conn.get("location", "-"),
-            "Fuse": conn.get("fuse", "-")
-        })
+for addr, ecu in ecu_map.items():
+    if ecu == "LNG Sensor 2" and not has_double_tank:
+        continue
+    if ecu in ["TCU", "Gear Shift Lever"] and not has_amt:
+        continue
+    if ecu == "Retarder Controller" and not has_retarder:
+        continue
+    status = "✅ OK" if addr in found_sources else "❌ MISSING"
+    conn = ecu_connector_map.get(ecu, {})
+    report.append({
+        "ECU": ecu,
+        "Source Address": f"0x{addr:02X}",
+        "Status": status,
+        "Connector": conn.get("connector", "-"),
+        "Location": conn.get("location", "-"),
+        "Fuse": conn.get("fuse", "-")
+    })
 
-    df_report = pd.DataFrame(report)
+df_report = pd.DataFrame(report)
 
-    if not df_report.empty:
-        # Log to Firebase
-        try:
-            log_to_firebase(vehicle_name, df_report)
-        except Exception:
-            pass
+if not df_report.empty:
+    # Log to Firebase
+    try:
+        log_to_firebase(vehicle_name, df_report)
+    except Exception:
+        pass
 
-        st.success("✅ Diagnostics completed!")
-        st.subheader("📋 ECU Status")
-        st.dataframe(df_report, use_container_width=True)
+    st.success("✅ Diagnostics completed!")
+    st.subheader("📋 ECU Status")
+    st.dataframe(df_report, use_container_width=True)
 
-        # Root Cause Analysis
-        st.subheader("🧠 Root Cause Analysis")
-        root_causes = infer_root_causes(df_report)
-        if root_causes:
-            for cause in root_causes:
-                st.markdown(
-                    f"""<div style='background:#fffbe6; border-left:5px solid #faad14; padding:10px; margin-bottom:10px;'>
-                    <b>{cause['Type']}</b>: <code>{cause['Component']}</code><br>
-                    Missing: {cause['Missing']} / {cause['Total']} — Confidence: {cause['Confidence']}%
-                    <br>ECUs: {', '.join(cause['Affected ECUs'])}</div>""",
-                    unsafe_allow_html=True
-                )
-        else:
-            st.info("No root-cause candidates found (no missing ECUs).")
+    # Root Cause Analysis
+    st.subheader("🧠 Root Cause Analysis")
+    root_causes = infer_root_causes(df_report)
+    if root_causes:
+        for cause in root_causes:
+            st.markdown(
+                f"""<div style='background:#fffbe6; border-left:5px solid #faad14; padding:10px; margin-bottom:10px;'>
+                <b>{cause['Type']}</b>: <code>{cause['Component']}</code><br>
+                Missing: {cause['Missing']} / {cause['Total']} — Confidence: {cause['Confidence']}%
+                <br>ECUs: {', '.join(cause['Affected ECUs'])}</div>""",
+                unsafe_allow_html=True
+            )
+    else:
+        st.info("No root-cause candidates found (no missing ECUs).")
 
-        # PDF report
-        pdf_buf = generate_pdf_buffer(report, vehicle_name)
-        st.download_button("⬇️ Download PDF Report", pdf_buf, f"{vehicle_name}_diagnostics.pdf", "application/pdf")
+    # PDF report
+    pdf_buf = generate_pdf_buffer(report, vehicle_name)
+    st.download_button("⬇️ Download PDF Report", pdf_buf, f"{vehicle_name}_diagnostics.pdf", "application/pdf")
 
-        # Detailed ECU diagnostics
-        st.subheader("🔧 Detailed ECU Diagnostics")
-        for _, row in df_report[df_report["Status"] == "❌ MISSING"].iterrows():
-            st.markdown(generate_detailed_diagnosis(row["ECU"]), unsafe_allow_html=True)
+    # Detailed ECU diagnostics
+    st.subheader("🔧 Detailed ECU Diagnostics")
+    for _, row in df_report[df_report["Status"] == "❌ MISSING"].iterrows():
+        st.markdown(generate_detailed_diagnosis(row["ECU"]), unsafe_allow_html=True)
 
-        # Visual Reference slides
-        st.markdown("---")
-        st.markdown("### 🖼️ Diagnostic Visual Reference")
-        slide_map = {
-            "Connector 3": [12],
-            "Connector 4": [3],
-            "89E": [5, 6, 7, 8, 9],
-            "Cabin Interface Connector (Brown)": [4],
-            "F47": [6],
-            "F46": [6],
-            "F42": [3],
-            "F43": [3],
-            "F52": [3],
-            "ABS ECU": [12],
-            "Telematics": [4],
-            "Instrument Cluster": [5, 6, 7],
-            "Engine ECU": [3],
-            "Gear Shift Lever": [3],
-            "TCU": [3],
-            "LNG Sensor 1": [3],
-            "LNG Sensor 2": [3],
-            "Retarder Controller": [3]
-        }
+    # Visual Reference slides
+    st.markdown("---")
+    st.markdown("### 🖼️ Diagnostic Visual Reference")
+    slide_map = {
+        "Connector 3": [12],
+        "Connector 4": [3],
+        "89E": [5, 6, 7, 8, 9],
+        "Cabin Interface Connector (Brown)": [4],
+        "F47": [6],
+        "F46": [6],
+        "F42": [3],
+        "F43": [3],
+        "F52": [3],
+        "ABS ECU": [12],
+        "Telematics": [4],
+        "Instrument Cluster": [5, 6, 7],
+        "Engine ECU": [3],
+        "Gear Shift Lever": [3],
+        "TCU": [3],
+        "LNG Sensor 1": [3],
+        "LNG Sensor 2": [3],
+        "Retarder Controller": [3]
+    }
 
-        def get_slide_path(slide_num: int):
-            candidates = [
-                os.path.join("Electrical Wiring", f"Slide{slide_num}.PNG"),
-                os.path.join("Electrical Wiring", f"Slide{slide_num}.png"),
-                os.path.join("static_images", f"Slide{slide_num}.PNG"),
-                os.path.join("static_images", f"Slide{slide_num}.png"),
-            ]
-            for p in candidates:
-                if os.path.exists(p):
-                    return p
-            return None
+    def get_slide_path(slide_num: int):
+        candidates = [
+            os.path.join("Electrical Wiring", f"Slide{slide_num}.PNG"),
+            os.path.join("Electrical Wiring", f"Slide{slide_num}.png"),
+            os.path.join("static_images", f"Slide{slide_num}.PNG"),
+            os.path.join("static_images", f"Slide{slide_num}.png"),
+        ]
+        for p in candidates:
+            if os.path.exists(p):
+                return p
+        return None
 
-        missing_slides = set()
-        for row in report:
-            if row["Status"] == "❌ MISSING":
-                for key in [row["ECU"], row["Connector"], row["Fuse"]]:
-                    missing_slides.update(slide_map.get(key, []))
+    missing_slides = set()
+    for row in report:
+        if row["Status"] == "❌ MISSING":
+            for key in [row["ECU"], row["Connector"], row["Fuse"]]:
+                missing_slides.update(slide_map.get(key, []))
 
-        if missing_slides:
-            st.success("📌 Relevant slides for missing ECUs: " + ", ".join(f"Slide {s}" for s in sorted(missing_slides)))
-            for slide_num in sorted(missing_slides):
-                slide_path = get_slide_path(slide_num)
-                if slide_path:
-                    st.image(slide_path, caption=f"Slide {slide_num}", use_container_width=True)
-                else:
-                    st.warning(f"⚠️ Slide {slide_num} image not found in 'Electrical Wiring' or 'static_images'.")
-        else:
-            st.info("✅ No ECUs are missing — all components appear functional.")
+    if missing_slides:
+        st.success("📌 Relevant slides for missing ECUs: " + ", ".join(f"Slide {s}" for s in sorted(missing_slides)))
+        for slide_num in sorted(missing_slides):
+            slide_path = get_slide_path(slide_num)
+            if slide_path:
+                st.image(slide_path, caption=f"Slide {slide_num}", use_container_width=True)
+            else:
+                st.warning(f"⚠️ Slide {slide_num} image not found in 'Electrical Wiring' or 'static_images'.")
+    else:
+        st.info("✅ No ECUs are missing — all components appear functional.")
 
-        # -------------------------
-        # DTC decoding section
-        # -------------------------
-        st.markdown("---")
-        st.subheader("🚨 Active Diagnostic Trouble Codes (DM1)")
-        df_dtcs = decode_dtcs_from_df(df_can)
-        if df_dtcs.empty:
-            st.info("No active DM1 DTCs detected.")
-        else:
-            st.dataframe(df_dtcs, use_container_width=True)
-            st.download_button("⬇️ Download DTC Report (CSV)", df_dtcs.to_csv(index=False), f"{vehicle_name}_dtc_report.csv", "text/csv")
+    # -------------------------
+    # DTC decoding section (uses latest JSON + WorkshopActions)
+    # -------------------------
+    st.markdown("---")
+    st.subheader("🚨 Active Diagnostic Trouble Codes (DM1)")
+    df_dtcs = decode_dtcs_from_df(df_can)
+    if df_dtcs.empty:
+        st.info("No active DM1 DTCs detected.")
+    else:
+        st.dataframe(df_dtcs, use_container_width=True)
+        st.download_button("⬇️ Download DTC Report (CSV)", df_dtcs.to_csv(index=False), f"{vehicle_name}_dtc_report.csv", "text/csv")
 
 # Footer
 st.markdown("---")
