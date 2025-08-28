@@ -1882,25 +1882,25 @@ with col_b:
         mime="application/json"
     )
 
-+# (Optional) keep a compact raw view for engineers (collapsed by default)
-+with st.expander("🔬 Raw ground label occurrences (engineering reference)", expanded=False):
-+    if not extraction or not extraction.get("grounds"):
-+        st.write("—")
-+    else:
-+        rows = []
-+        for g_label, hits in sorted(extraction["grounds"].items()):
-+            for h in hits:
-+                rows.append({
-+                    "Ground": g_label,
-+                    "File": os.path.basename(h.get("file","")),
-+                    "Page": h.get("page"),
-+                    "Coords (approx)": h.get("coords"),
-+                    "Context": h.get("text_snippet","")
-+                })
-+        if rows:
-+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-+        else:
-+            st.write("—")
+# (Optional) keep a compact raw view for engineers (collapsed by default)
+with st.expander("🔬 Raw ground label occurrences (engineering reference)", expanded=False):
+    if not extraction or not extraction.get("grounds"):
+        st.write("—")
+    else:
+        rows = []
+        for g_label, hits in sorted(extraction["grounds"].items()):
+            for h in hits:
+                rows.append({
+                    "Ground": g_label,
+                    "File": os.path.basename(h.get("file","")),
+                    "Page": h.get("page"),
+                    "Coords (approx)": h.get("coords"),
+                    "Context": h.get("text_snippet","")
+                })
+        if rows:
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            st.write("—")
 
 # -------------------------
 # Wrap-up & tech tips
@@ -1929,6 +1929,7 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
 
 
