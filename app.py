@@ -1,4 +1,4 @@
-# app.py — EurekaCheck Unified Diagnostic Tool (TP/BAM reassembly + DM1 with DTC count parsing)
+# app.py — EurekaCheck Unified Diagnostic Tool (TP/BAM reassembly + DM1 with corrected lamp parsing)
 import streamlit as st
 from streamlit_javascript import st_javascript
 import re
@@ -332,47 +332,85 @@ def parse_trc_file(file_path: str) -> pd.DataFrame:
     return pd.DataFrame(records)
 
 # -------------------------
-# J1939 / DM1 parsing (SPN/FMI extraction)
+# J1939 / DM1 parsing (SPN/FMI + corrected lamp strategy)
 # -------------------------
 DM1_PGN = 0xFECA  # 65226
 TP_CM_PGN = 0xEC00  # 60416 (TP.CM)
 TP_DT_PGN = 0xEB00  # 60160 (TP.DT)
 
+# 2-bit decode maps per J1939-73
+_LAMP_CMD = {0b00: "OFF", 0b01: "ON", 0b10: "FLASH", 0b11: "N/A"}
+_FLASH_RATE = {0b00: "STEADY", 0b01: "SLOW", 0b10: "FAST", 0b11: "N/A"}
+
+def _lamp_bits(v: int, shift: int) -> int:
+    return (v >> shift) & 0x03
+
 def parse_dm1_frame_with_lamp(data_bytes: bytes):
     """
-    Parse DM1 payload strictly according to SAE J1939-73 (Version 4 layout).
+    DM1 Byte 1: Lamp Command (2 bits per lamp) -> 00 OFF, 01 ON, 10 FLASH, 11 N/A
+    DM1 Byte 2: Flash Rate (2 bits per lamp) -> 00 STEADY, 01 SLOW, 10 FAST, 11 N/A
+    Subsequent bytes: DTCs (4-byte blocks)
+    Returns: lamp (dict), dtcs (list)
     """
-    lamp = {"MIL": None, "RSL": None, "AWL": None, "PL": None, "FlashMIL": None, "FlashRSL": None, "FlashAWL": None, "FlashPL": None}
+    lamp = {
+        # booleans (ON includes FLASH)
+        "MIL": None, "RSL": None, "AWL": None, "PL": None,
+        # flashing booleans from command
+        "FlashMIL": None, "FlashRSL": None, "FlashAWL": None, "FlashPL": None,
+        # human-friendly command enum
+        "MIL State": None, "RSL State": None, "AWL State": None, "PL State": None,
+        # flash rate enum from byte 2
+        "MIL Flash Rate": None, "RSL Flash Rate": None, "AWL Flash Rate": None, "PL Flash Rate": None,
+    }
     dtcs = []
 
-    if not data_bytes or len(data_bytes) < 1:
+    if not data_bytes:
         return lamp, dtcs
 
-    # Lamp byte (Byte1)
-    lb = data_bytes[0]
-    def twobit(val, shift):
-        return (val >> shift) & 0x03
-    try:
-        mil_state = twobit(lb, 0)
-        rsl_state = twobit(lb, 2)
-        awl_state = twobit(lb, 4)
-        pl_state = twobit(lb, 6)
-        lamp["MIL"] = (mil_state == 1)
-        lamp["RSL"] = (rsl_state == 1)
-        lamp["AWL"] = (awl_state == 1)
-        lamp["PL"] = (pl_state == 1)
-    except Exception:
-        lamp["MIL"] = lamp["RSL"] = lamp["AWL"] = lamp["PL"] = None
+    # --- Lamps ---
+    b1 = data_bytes[0] if len(data_bytes) >= 1 else 0xFF
+    b2 = data_bytes[1] if len(data_bytes) >= 2 else 0xFF
 
-    # Flash byte (Byte2)
-    if len(data_bytes) >= 2:
-        fb = data_bytes[1]
-        lamp["FlashMIL"] = ((fb >> 0) & 0x03) == 1
-        lamp["FlashRSL"] = ((fb >> 2) & 0x03) == 1
-        lamp["FlashAWL"] = ((fb >> 4) & 0x03) == 1
-        lamp["FlashPL"]  = ((fb >> 6) & 0x03) == 1
+    # extract command per lamp
+    mil_cmd = _lamp_bits(b1, 0)
+    rsl_cmd = _lamp_bits(b1, 2)
+    awl_cmd = _lamp_bits(b1, 4)
+    pl_cmd  = _lamp_bits(b1, 6)
 
-    # Determine count of 4-byte DTC blocks after first two bytes
+    # extract flash-rate per lamp
+    mil_fr = _lamp_bits(b2, 0)
+    rsl_fr = _lamp_bits(b2, 2)
+    awl_fr = _lamp_bits(b2, 4)
+    pl_fr  = _lamp_bits(b2, 6)
+
+    def to_bool_on(cmd):  # ON includes FLASH
+        return cmd in (0b01, 0b10)
+
+    def to_bool_flash(cmd):  # flashing only when command == FLASH
+        return cmd == 0b10
+
+    # populate lamp dict
+    lamp["MIL State"] = _LAMP_CMD.get(mil_cmd)
+    lamp["RSL State"] = _LAMP_CMD.get(rsl_cmd)
+    lamp["AWL State"] = _LAMP_CMD.get(awl_cmd)
+    lamp["PL State"]  = _LAMP_CMD.get(pl_cmd)
+
+    lamp["MIL"] = to_bool_on(mil_cmd)
+    lamp["RSL"] = to_bool_on(rsl_cmd)
+    lamp["AWL"] = to_bool_on(awl_cmd)
+    lamp["PL"]  = to_bool_on(pl_cmd)
+
+    lamp["FlashMIL"] = to_bool_flash(mil_cmd)
+    lamp["FlashRSL"] = to_bool_flash(rsl_cmd)
+    lamp["FlashAWL"] = to_bool_flash(awl_cmd)
+    lamp["FlashPL"]  = to_bool_flash(pl_cmd)
+
+    lamp["MIL Flash Rate"] = _FLASH_RATE.get(mil_fr)
+    lamp["RSL Flash Rate"] = _FLASH_RATE.get(rsl_fr)
+    lamp["AWL Flash Rate"] = _FLASH_RATE.get(awl_fr)
+    lamp["PL Flash Rate"]  = _FLASH_RATE.get(pl_fr)
+
+    # --- DTCs ---
     if len(data_bytes) <= 2:
         return lamp, dtcs
 
@@ -383,27 +421,20 @@ def parse_dm1_frame_with_lamp(data_bytes: bytes):
         offset = 2 + i * 4
         if offset + 3 >= len(data_bytes):
             break
-        b1 = data_bytes[offset]       # SPN low 8
-        b2 = data_bytes[offset + 1]   # SPN next 8
-        b3 = data_bytes[offset + 2]   # SPN high 3 bits + FMI (low 5 bits)
-        b4 = data_bytes[offset + 3]   # CM (bit7) + OC (bits6..0)
+        b1d = data_bytes[offset]       # SPN low 8
+        b2d = data_bytes[offset + 1]   # SPN next 8
+        b3d = data_bytes[offset + 2]   # SPN high 3 bits + FMI (low 5 bits)
+        b4d = data_bytes[offset + 3]   # CM (bit7) + OC (bits6..0)
 
-        spn = int(b1) | (int(b2) << 8) | ((int(b3) & 0xE0) << 11)  # SPN
-        fmi = int(b3) & 0x1F                                        # FMI
-        cm = (int(b4) & 0x80) >> 7                                  # Conversion Method
-        oc = int(b4) & 0x7F                                         # Occurrence Count
+        spn = int(b1d) | (int(b2d) << 8) | ((int(b3d) & 0xE0) << 11)
+        fmi = int(b3d) & 0x1F
+        cm  = (int(b4d) & 0x80) >> 7
+        oc  = int(b4d) & 0x7F
 
-        # Skip empty slots
         if spn == 0 and fmi == 0 and oc == 0:
             continue
 
-        dtcs.append({
-            "SPN": spn,
-            "FMI": fmi,
-            "OC": oc,
-            "CM": cm,
-            "offset": offset
-        })
+        dtcs.append({"SPN": spn, "FMI": fmi, "OC": oc, "CM": cm, "offset": offset})
 
     return lamp, dtcs
 
@@ -550,7 +581,6 @@ def load_dtc_lookup(json_cache: str = JSON_LOOKUP_PATH):
             "Extra": x.get("Extra", {}),
             "WorkshopActions": x.get("WorkshopActions", None),
         }
-        # Fallback for ABS-only JSONs if WorkshopActions missing but Extra.WorkshopAction present
         if not entry["WorkshopActions"]:
             extra = entry.get("Extra") or {}
             wa = extra.get("WorkshopAction")
@@ -584,7 +614,7 @@ def _format_workshop_actions(entry: dict) -> str:
     return ""
 
 # -------------------------
-# DTC decode routine (applies lookup)
+# DTC decode routine (applies lookup + corrected lamp fields)
 # -------------------------
 def decode_dtcs_from_df(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -603,7 +633,7 @@ def decode_dtcs_from_df(df: pd.DataFrame) -> pd.DataFrame:
         if pgn != DM1_PGN:
             continue
         lamp, dtcs = parse_dm1_frame_with_lamp(data)
-        # DTC list (zero or more)
+
         for d in dtcs:
             key = (d["SPN"], d["FMI"])
             entry = DTC_LOOKUP.get(key, {})
@@ -620,13 +650,23 @@ def decode_dtcs_from_df(df: pd.DataFrame) -> pd.DataFrame:
                 "Description": entry.get("Description", "Unknown (not in lookup)"),
                 "Error Class": entry.get("Error Class", ""),
                 "Workshop Actions": _format_workshop_actions(entry),
+                # corrected lamp outputs
                 "MIL": lamp.get("MIL"),
+                "MIL Flash": lamp.get("FlashMIL"),
+                "MIL Flash Rate": lamp.get("MIL Flash Rate"),
                 "RSL": lamp.get("RSL"),
+                "RSL Flash": lamp.get("FlashRSL"),
+                "RSL Flash Rate": lamp.get("RSL Flash Rate"),
                 "AWL": lamp.get("AWL"),
-                "PL": lamp.get("PL")
+                "AWL Flash": lamp.get("FlashAWL"),
+                "AWL Flash Rate": lamp.get("AWL Flash Rate"),
+                "PL": lamp.get("PL"),
+                "PL Flash": lamp.get("FlashPL"),
+                "PL Flash Rate": lamp.get("PL Flash Rate"),
             })
-        # If no dtcs but lamp indicates MIL ON, still report lamp status row
-        if not dtcs and lamp.get("MIL"):
+
+        # If no DTCs but MIL indicates ON/FLASH, still report a lamp status row
+        if not dtcs and (lamp.get("MIL") is True):
             rows.append({
                 "Time": r.get("Timestamp"),
                 "Source Address": f"0x{(can_id & 0xFF):02X}",
@@ -637,14 +677,23 @@ def decode_dtcs_from_df(df: pd.DataFrame) -> pd.DataFrame:
                 "CM": None,
                 "DTC": "",
                 "Title": "",
-                "Description": "No SPN/FMI present in payload — MIL ON",
+                "Description": "MIL active but no SPN/FMI blocks present",
                 "Error Class": "",
                 "Workshop Actions": "",
                 "MIL": lamp.get("MIL"),
+                "MIL Flash": lamp.get("FlashMIL"),
+                "MIL Flash Rate": lamp.get("MIL Flash Rate"),
                 "RSL": lamp.get("RSL"),
+                "RSL Flash": lamp.get("FlashRSL"),
+                "RSL Flash Rate": lamp.get("RSL Flash Rate"),
                 "AWL": lamp.get("AWL"),
-                "PL": lamp.get("PL")
+                "AWL Flash": lamp.get("FlashAWL"),
+                "AWL Flash Rate": lamp.get("AWL Flash Rate"),
+                "PL": lamp.get("PL"),
+                "PL Flash": lamp.get("FlashPL"),
+                "PL Flash Rate": lamp.get("PL Flash Rate"),
             })
+
     out = pd.DataFrame(rows)
     if not out.empty:
         out = (out.sort_values(["Source Address", "SPN", "FMI", "OC"], ascending=[True, True, True, False])
@@ -945,7 +994,7 @@ if not df_report.empty:
         st.info("✅ No ECUs are missing — all components appear functional.")
 
     # -------------------------
-    # DTC decoding section (uses latest JSON + WorkshopActions)
+    # DTC decoding section (uses latest JSON + WorkshopActions + corrected lamps)
     # -------------------------
     st.markdown("---")
     st.subheader("🚨 Active Diagnostic Trouble Codes (DM1)")
