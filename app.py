@@ -1,6 +1,9 @@
+# Build the completed `app.py` and save it for download
+app_code = r'''
 # app.py — EurekaCheck Unified Diagnostic Tool
-# (TP/BAM reassembly + DM1 with corrected lamp parsing + Clean DM1 table + Firebase DTC logging
-#  + Wiring Fault Analyzer using harness drawings and heuristics)
+# TP/BAM reassembly + DM1 with corrected lamp parsing + Clean DM1 table
+# Firebase upload (ECU presence, DTCs) + Wiring/Ground Heuristics
+# + Wiring PDF parsing to extract ground labels and connector-pin→ground mappings
 
 import streamlit as st
 from streamlit_javascript import st_javascript
@@ -9,7 +12,7 @@ import io
 import pandas as pd
 from datetime import datetime
 from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
+from reportlab.pdfgen import canvas as rl_canvas
 from reportlab.lib import colors
 from collections import defaultdict, Counter
 import os
@@ -18,6 +21,18 @@ import tempfile
 import time
 import json
 import requests
+
+# Optional: PDF parsers for wiring drawings
+PDF_BACKEND = None
+try:
+    import pdfplumber  # best for coordinates
+    PDF_BACKEND = "pdfplumber"
+except Exception:
+    try:
+        from PyPDF2 import PdfReader  # text-only fallback
+        PDF_BACKEND = "pypdf2"
+    except Exception:
+        PDF_BACKEND = None
 
 # Firebase
 import firebase_admin
@@ -149,8 +164,7 @@ def log_dtcs_to_firebase(vehicle_name: str, raw_dtcs: pd.DataFrame = None, clean
     except Exception as e:
         st.warning(f"⚠️ Firestore DTC upload failed: {e}")
 
-# Wiring/ground heuristic uploads
-def log_wiring_findings(vehicle_name: str, findings: list, faults: list, extra: dict = None):
+def log_wiring_findings(vehicle_name: str, findings: list, faults: list, extracted: dict = None):
     if db is None:
         return
     payload = {
@@ -159,13 +173,27 @@ def log_wiring_findings(vehicle_name: str, findings: list, faults: list, extra: 
         "timestamp": datetime.now().isoformat(),
         "findings": findings or [],
         "fault_hypotheses": faults or [],
-        "extra": extra or {}
+        "extracted": extracted or {}
     }
     try:
-        db.collection("diagnostics_wiring_health").add(payload)   # cluster/behavior findings
-        db.collection("diagnostics_wiring_faults").add(payload)   # per-DTC fault hypotheses
+        db.collection("diagnostics_wiring_health").add(payload)
+        db.collection("diagnostics_wiring_faults").add(payload)
     except Exception as e:
         st.warning(f"⚠️ Firestore wiring upload failed: {e}")
+
+def log_wiring_extraction(vehicle_name: str, extraction: dict):
+    if db is None:
+        return
+    payload = {
+        "vehicle": vehicle_name,
+        "user_info": _current_user_info(),
+        "timestamp": datetime.now().isoformat(),
+        "extraction": extraction
+    }
+    try:
+        db.collection("wiring_extractions").add(payload)
+    except Exception as e:
+        st.warning(f"⚠️ Firestore extraction upload failed: {e}")
 
 def update_visitor_count_firestore():
     if db is None:
@@ -281,13 +309,13 @@ ecu_connector_map = {
 }
 
 drawing_map = {
-    # PDFs present in your environment
+    # Default drawings known in project
     "Connector 3": "PEE0000014_K.pdf",
     "Connector 4": "PEE0000014_K.pdf",
     "F46": "PEE0000014_K.pdf",
     "F47": "PEE0000014_K.pdf",
     "F42": "PEE0000014_K.pdf",
-    "Cabin Harness": "PEE0000014_K.pdf",                      # localized cabin/front harness
+    "Cabin Harness": "PEE0000014_K.pdf",
     "Front Chassis Wiring Harness": "PEE0000082 FRONT CHASSIS WIRING HARNESS FOR LOCALIZED CABIN.pdf",
     "Rear Harness": "PEE0000083_A_01072024.pdf",
     "Retarder Wiring": "PEE0000013_J.pdf",
@@ -295,8 +323,8 @@ drawing_map = {
     "Trailer Interface": "PEE0000084.pdf"
 }
 
-# Power/Ground topology (update with true ground point IDs when available)
-ground_map = {
+# Power/Ground topology (static defaults; can be overridden by PDF parsing)
+ground_map_default = {
     "Engine ECU": "G101",
     "ABS ECU": "G201",
     "Telematics": "G202",
@@ -313,7 +341,7 @@ ground_map = {
 # -------------------------
 def generate_pdf_buffer(report_data, vehicle_name):
     buffer = io.BytesIO()
-    c = canvas.Canvas(buffer, pagesize=A4)
+    c = rl_canvas.Canvas(buffer, pagesize=A4)
     width, height = A4
     c.setFont("Helvetica-Bold", 14)
     c.drawString(50, height - 50, f"Diagnostic Report - {vehicle_name}")
@@ -352,7 +380,7 @@ def parse_trc_file(file_path: str) -> pd.DataFrame:
     try:
         with open(file_path, "r", errors="ignore") as f:
             for line in f:
-                # Primary pattern: "1)   0.000 Rx   18FECA17   8  00 FF FF 00 00 00 00 00"
+                # Pattern: "1)   0.000 Rx   18FECA17   8  00 FF FF 00 00 00 00 00"
                 m = re.match(r"\s*\d+\)\s+([\d.]+)\s+Rx\s+([0-9A-Fa-f]{6,8})\s+(\d+)\s+((?:[0-9A-Fa-f]{2}\s+)+)", line)
                 if m:
                     ts = float(m.group(1))
@@ -361,13 +389,7 @@ def parse_trc_file(file_path: str) -> pd.DataFrame:
                     data_str = m.group(4).strip()
                     data_bytes = bytes(int(b, 16) for b in data_str.split()[:dlc])
                     sa = can_id & 0xFF
-                    records.append({
-                        "Timestamp": ts,
-                        "CAN ID": can_id,
-                        "DLC": dlc,
-                        "Data": data_bytes,
-                        "Source Address": sa
-                    })
+                    records.append({"Timestamp": ts, "CAN ID": can_id, "DLC": dlc, "Data": data_bytes, "Source Address": sa})
                     continue
                 # Fallback pattern: "ID = 18FECA17 Len = 8 Data = 00 FF ..."
                 m2 = re.search(r"ID\s*=\s*([0-9A-Fa-f]{6,8}).*?Len\s*=\s*(\d+).*?Data\s*=\s*((?:[0-9A-Fa-f]{2}\s+)+)", line)
@@ -377,13 +399,7 @@ def parse_trc_file(file_path: str) -> pd.DataFrame:
                     data_str = m2.group(3).strip()
                     data_bytes = bytes(int(b, 16) for b in data_str.split()[:dlc])
                     sa = can_id & 0xFF
-                    records.append({
-                        "Timestamp": None,
-                        "CAN ID": can_id,
-                        "DLC": dlc,
-                        "Data": data_bytes,
-                        "Source Address": sa
-                    })
+                    records.append({"Timestamp": None, "CAN ID": can_id, "DLC": dlc, "Data": data_bytes, "Source Address": sa})
     except Exception as e:
         st.error(f"❌ Failed to parse .trc file: {e}")
         return pd.DataFrame()
@@ -398,7 +414,6 @@ TP_DT_PGN = 0xEB00  # 60160 (TP.DT)
 
 # 2-bit decode maps per J1939-73
 _LAMP_CMD = {0b00: "OFF", 0b01: "ON", 0b10: "FLASH", 0b11: "N/A"}
-# Byte 2 = flash status (NONE/SLOW/FAST/N/A)
 _FLASH_CODE = {0b00: "NONE", 0b01: "SLOW", 0b10: "FAST", 0b11: "N/A"}
 
 def _lamp_bits(v: int, shift: int) -> int:
@@ -412,13 +427,9 @@ def parse_dm1_frame_with_lamp(data_bytes: bytes):
     Returns: lamp (dict), dtcs (list)
     """
     lamp = {
-        # booleans (ON includes steady or flashing)
         "MIL": None, "RSL": None, "AWL": None, "PL": None,
-        # flashing booleans
         "FlashMIL": None, "FlashRSL": None, "FlashAWL": None, "FlashPL": None,
-        # human-friendly command enum
         "MIL State": None, "RSL State": None, "AWL State": None, "PL State": None,
-        # flash status (NONE/SLOW/FAST/N/A)
         "MIL Flash Rate": None, "RSL Flash Rate": None, "AWL Flash Rate": None, "PL Flash Rate": None,
     }
     dtcs = []
@@ -426,11 +437,10 @@ def parse_dm1_frame_with_lamp(data_bytes: bytes):
     if not data_bytes:
         return lamp, dtcs
 
-    # --- Lamps ---
     b1 = data_bytes[0] if len(data_bytes) >= 1 else 0xFF
     b2 = data_bytes[1] if len(data_bytes) >= 2 else 0xFF
 
-    # Correct bit ordering per J1939-73 (MSB->LSB)
+    # Correct MSB->LSB ordering
     mil_cmd = _lamp_bits(b1, 6)
     rsl_cmd = _lamp_bits(b1, 4)
     awl_cmd = _lamp_bits(b1, 2)
@@ -441,12 +451,10 @@ def parse_dm1_frame_with_lamp(data_bytes: bytes):
     awl_fr = _lamp_bits(b2, 2)
     pl_fr  = _lamp_bits(b2, 0)
 
-    # 'On' means lamp lit (steady or flashing). Use either status=ON/FLASH or flash != NONE
     def lit(cmd, fr):
         return (cmd in (0b01, 0b10)) or (fr in (0b01, 0b10))
 
     def flashing(fr, cmd):
-        # Prefer explicit flash status in Byte 2; fall back to command == FLASH
         return fr in (0b01, 0b10) or (cmd == 0b10)
 
     lamp["MIL State"] = _LAMP_CMD.get(mil_cmd)
@@ -469,21 +477,19 @@ def parse_dm1_frame_with_lamp(data_bytes: bytes):
     lamp["AWL Flash Rate"]  = _FLASH_CODE.get(awl_fr)
     lamp["PL Flash Rate"]   = _FLASH_CODE.get(pl_fr)
 
-    # --- DTCs ---
     if len(data_bytes) <= 2:
         return lamp, dtcs
 
     available = len(data_bytes) - 2
     dtc_count = available // 4
-
     for i in range(dtc_count):
         offset = 2 + i * 4
         if offset + 3 >= len(data_bytes):
             break
-        b1d = data_bytes[offset]       # SPN low 8
-        b2d = data_bytes[offset + 1]   # SPN next 8
-        b3d = data_bytes[offset + 2]   # SPN high 3 bits + FMI (low 5 bits)
-        b4d = data_bytes[offset + 3]   # CM (bit7) + OC (bits6..0)
+        b1d = data_bytes[offset]
+        b2d = data_bytes[offset + 1]
+        b3d = data_bytes[offset + 2]
+        b4d = data_bytes[offset + 3]
 
         spn = int(b1d) | (int(b2d) << 8) | ((int(b3d) & 0xE0) << 11)
         fmi = int(b3d) & 0x1F
@@ -516,9 +522,8 @@ def assemble_tp_bam(df: pd.DataFrame):
             continue
         pgn = (can_id >> 8) & 0xFFFF
         sa = int(can_id & 0xFF)
-        if pgn == TP_CM_PGN:
-            if len(data) < 8:
-                continue
+        if pgn == 0xEC00:  # TP.CM
+            if len(data) < 8: continue
             control = data[0]
             if control == 0x20:  # BAM
                 total_size = data[1] | (data[2] << 8)
@@ -531,9 +536,8 @@ def assemble_tp_bam(df: pd.DataFrame):
                     "received": {},
                     "start_ts": ts
                 }
-        elif pgn == TP_DT_PGN:
-            if len(data) < 1:
-                continue
+        elif pgn == 0xEB00:  # TP.DT
+            if len(data) < 1: continue
             seq = data[0]
             payload = bytes(data[1:])
             if sa in open_bams and open_bams[sa]["total_packets"] >= seq >= 1:
@@ -709,48 +713,24 @@ def decode_dtcs_from_df(df: pd.DataFrame) -> pd.DataFrame:
                 "Description": entry.get("Description", "Unknown (not in lookup)"),
                 "Error Class": entry.get("Error Class", ""),
                 "Workshop Actions": _format_workshop_actions(entry),
-                # corrected lamp outputs
-                "MIL": lamp.get("MIL"),
-                "MIL Flash": lamp.get("FlashMIL"),
-                "MIL Flash Rate": lamp.get("MIL Flash Rate"),
-                "RSL": lamp.get("RSL"),
-                "RSL Flash": lamp.get("FlashRSL"),
-                "RSL Flash Rate": lamp.get("RSL Flash Rate"),
-                "AWL": lamp.get("AWL"),
-                "AWL Flash": lamp.get("FlashAWL"),
-                "AWL Flash Rate": lamp.get("AWL Flash Rate"),
-                "PL": lamp.get("PL"),
-                "PL Flash": lamp.get("FlashPL"),
-                "PL Flash Rate": lamp.get("PL Flash Rate"),
+                "MIL": lamp.get("MIL"), "MIL Flash": lamp.get("FlashMIL"), "MIL Flash Rate": lamp.get("MIL Flash Rate"),
+                "RSL": lamp.get("RSL"), "RSL Flash": lamp.get("FlashRSL"), "RSL Flash Rate": lamp.get("RSL Flash Rate"),
+                "AWL": lamp.get("AWL"), "AWL Flash": lamp.get("FlashAWL"), "AWL Flash Rate": lamp.get("AWL Flash Rate"),
+                "PL": lamp.get("PL"), "PL Flash": lamp.get("FlashPL"), "PL Flash Rate": lamp.get("PL Flash Rate"),
             })
 
-        # If no DTCs but any lamp indicates ON/FLASH, still report a lamp status row
         if not dtcs and any(lamp.get(k) is True for k in ("MIL", "RSL", "AWL", "PL")):
             rows.append({
                 "Time": r.get("Timestamp"),
                 "Source Address": f"0x{(can_id & 0xFF):02X}",
                 "Assembled": bool(r.get("Assembled", False)),
-                "SPN": None,
-                "FMI": None,
-                "OC": None,
-                "CM": None,
-                "DTC": "",
-                "Title": "",
-                "Description": "Lamp active but no SPN/FMI blocks present",
-                "Error Class": "",
-                "Workshop Actions": "",
-                "MIL": lamp.get("MIL"),
-                "MIL Flash": lamp.get("FlashMIL"),
-                "MIL Flash Rate": lamp.get("MIL Flash Rate"),
-                "RSL": lamp.get("RSL"),
-                "RSL Flash": lamp.get("FlashRSL"),
-                "RSL Flash Rate": lamp.get("RSL Flash Rate"),
-                "AWL": lamp.get("AWL"),
-                "AWL Flash": lamp.get("FlashAWL"),
-                "AWL Flash Rate": lamp.get("AWL Flash Rate"),
-                "PL": lamp.get("PL"),
-                "PL Flash": lamp.get("FlashPL"),
-                "PL Flash Rate": lamp.get("PL Flash Rate"),
+                "SPN": None, "FMI": None, "OC": None, "CM": None,
+                "DTC": "", "Title": "", "Description": "Lamp active but no SPN/FMI blocks present",
+                "Error Class": "", "Workshop Actions": "",
+                "MIL": lamp.get("MIL"), "MIL Flash": lamp.get("FlashMIL"), "MIL Flash Rate": lamp.get("MIL Flash Rate"),
+                "RSL": lamp.get("RSL"), "RSL Flash": lamp.get("FlashRSL"), "RSL Flash Rate": lamp.get("RSL Flash Rate"),
+                "AWL": lamp.get("AWL"), "AWL Flash": lamp.get("FlashAWL"), "AWL Flash Rate": lamp.get("AWL Flash Rate"),
+                "PL": lamp.get("PL"), "PL Flash": lamp.get("FlashPL"), "PL Flash Rate": lamp.get("PL Flash Rate"),
             })
 
     out = pd.DataFrame(rows)
@@ -847,6 +827,155 @@ def generate_detailed_diagnosis(ecu_name: str):
 """
 
 # -------------------------
+# Wiring PDF parsing (grounds & connector-pin→ground)
+# -------------------------
+GROUND_REGEX = re.compile(r"\bG(\d{2,4})\b", re.IGNORECASE)
+# Example connector/pin→ground pattern: "Connector 3 Pin 4 -> G201" or "89E pin 2 — G203"
+CONN_PIN_GROUND_REGEX = re.compile(
+    r"(?:(?:Conn(?:ector)?)[\s:]*|(?:\bC\b)?)([A-Za-z0-9\-_/ ]{1,20})\s*(?:pin|PIN|Pin)\s*([0-9]{1,3})[^A-Za-z0-9]+(G\d{2,4})",
+    re.IGNORECASE
+)
+
+def list_available_drawings():
+    candidates = [
+        "PEE0000013_J.pdf",
+        "PEE0000014_K.pdf",
+        "PEE0000082 FRONT CHASSIS WIRING HARNESS FOR LOCALIZED CABIN.pdf",
+        "PEE0000083_A_01072024.pdf",
+        "PEE0000084.pdf",
+    ]
+    found = []
+    for c in candidates:
+        if os.path.exists(c):
+            found.append(c)
+        elif os.path.exists(os.path.join("/mnt/data", c)):
+            found.append(os.path.join("/mnt/data", c))
+    return found
+
+def parse_pdfs_for_grounds_and_mappings(paths):
+    """
+    Returns:
+      {
+        "grounds": { "G201": [ {file, page, coords: (x0,y0,x1,y1) or None, text_snippet } ...], ... },
+        "conn_pin_ground": [ {file, page, connector, pin, ground, context, coords}, ... ]
+      }
+    """
+    results = {"grounds": defaultdict(list), "conn_pin_ground": []}
+    if not paths:
+        return results
+
+    for p in paths:
+        try:
+            if PDF_BACKEND == "pdfplumber":
+                with pdfplumber.open(p) as pdf:
+                    for page_idx, page in enumerate(pdf.pages, start=1):
+                        try:
+                            words = page.extract_words(use_text_flow=True, keep_blank_chars=False)
+                            text = page.extract_text() or ""
+                        except Exception:
+                            words, text = [], ""
+                        # Ground labels
+                        for m in GROUND_REGEX.finditer(text):
+                            g = f"G{m.group(1)}"
+                            snippet_start = max(0, m.start() - 30)
+                            snippet_end = min(len(text), m.end() + 30)
+                            snippet = text[snippet_start:snippet_end].replace("\n", " ")
+                            bbox = None
+                            target = g
+                            for w in words or []:
+                                if w.get("text","").strip() == target:
+                                    bbox = (w.get("x0"), w.get("top"), w.get("x1"), w.get("bottom"))
+                                    break
+                            results["grounds"][g].append({
+                                "file": p, "page": page_idx, "coords": bbox, "text_snippet": snippet
+                            })
+                        # Connector/pin -> ground
+                        for m in CONN_PIN_GROUND_REGEX.finditer(text):
+                            connector = (m.group(1) or "").strip()
+                            pin = m.group(2)
+                            ground = m.group(3).upper()
+                            ctx_start = max(0, m.start() - 40)
+                            ctx_end = min(len(text), m.end() + 40)
+                            context = text[ctx_start:ctx_end].replace("\n", " ")
+                            results["conn_pin_ground"].append({
+                                "file": p, "page": page_idx, "connector": connector, "pin": pin, "ground": ground, "context": context, "coords": None
+                            })
+            elif PDF_BACKEND == "pypdf2":
+                reader = PdfReader(p)
+                for page_idx, page in enumerate(reader.pages, start=1):
+                    try:
+                        text = page.extract_text() or ""
+                    except Exception:
+                        text = ""
+                    for m in GROUND_REGEX.finditer(text):
+                        g = f"G{m.group(1)}"
+                        snippet_start = max(0, m.start() - 30)
+                        snippet_end = min(len(text), m.end() + 30)
+                        snippet = text[snippet_start:snippet_end].replace("\n", " ")
+                        results["grounds"][g].append({
+                            "file": p, "page": page_idx, "coords": None, "text_snippet": snippet
+                        })
+                    for m in CONN_PIN_GROUND_REGEX.finditer(text):
+                        connector = (m.group(1) or "").strip()
+                        pin = m.group(2)
+                        ground = m.group(3).upper()
+                        ctx_start = max(0, m.start() - 40)
+                        ctx_end = min(len(text), m.end() + 40)
+                        context = text[ctx_start:ctx_end].replace("\n", " ")
+                        results["conn_pin_ground"].append({
+                            "file": p, "page": page_idx, "connector": connector, "pin": pin, "ground": ground, "context": context, "coords": None
+                        })
+            else:
+                st.warning("⚠️ No PDF backend available. Install `pdfplumber` or `PyPDF2` to enable parsing.")
+                break
+        except Exception as e:
+            st.warning(f"⚠️ Failed parsing '{p}': {e}")
+            continue
+    return results
+
+def build_dynamic_ground_map(ecu_connector_map, extraction):
+    """
+    Use connector-pin→ground hits to assign grounds per ECU based on its main connector.
+    Returns: dict ecu_name -> ground_label (best guess)
+    """
+    dynamic_map = {}
+    if not extraction or "conn_pin_ground" not in extraction:
+        return dynamic_map
+
+    hits_by_connector = defaultdict(list)
+    for hit in extraction["conn_pin_ground"]:
+        conn = (hit.get("connector") or "").strip().lower()
+        if conn:
+            hits_by_connector[conn].append(hit)
+
+    for ecu, meta in ecu_connector_map.items():
+        conn_name = (meta.get("connector") or "").strip()
+        if not conn_name:
+            continue
+        key_variants = {
+            conn_name.lower(),
+            conn_name.replace("connector", "").strip().lower(),
+            conn_name.replace(" ", "").lower()
+        }
+        best = None
+        for k in list(key_variants):
+            if k in hits_by_connector:
+                best = hits_by_connector[k]
+                break
+        if best is None:
+            for k, v in hits_by_connector.items():
+                if conn_name.lower() in k or k in conn_name.lower():
+                    best = v
+                    break
+        if best:
+            counter = Counter([h["ground"] for h in best if h.get("ground")])
+            if counter:
+                ground, _ = counter.most_common(1)[0]
+                dynamic_map[ecu] = ground
+
+    return dynamic_map
+
+# -------------------------
 # UI: Vehicle info & config
 # -------------------------
 st.markdown("### 🚛 Vehicle Info")
@@ -923,7 +1052,7 @@ if not has_data:
     st.stop()
 
 # -------------------------
-# Build ECU presence report & harness analysis & DTCs
+# Build ECU presence report
 # -------------------------
 if not vehicle_name.strip():
     st.info("📝 Please enter a vehicle name to run diagnostics.")
@@ -945,12 +1074,9 @@ if not df_can.empty and "Source Address" in df_can.columns:
             found_sources = set()
 
 for addr, ecu in ecu_map.items():
-    if ecu == "LNG Sensor 2" and not has_double_tank:
-        continue
-    if ecu in ["TCU", "Gear Shift Lever"] and not has_amt:
-        continue
-    if ecu == "Retarder Controller" and not has_retarder:
-        continue
+    if ecu == "LNG Sensor 2" and not has_double_tank: continue
+    if ecu in ["TCU", "Gear Shift Lever"] and not has_amt: continue
+    if ecu == "Retarder Controller" and not has_retarder: continue
     status = "✅ OK" if addr in found_sources else "❌ MISSING"
     conn = ecu_connector_map.get(ecu, {})
     report.append({
@@ -964,554 +1090,565 @@ for addr, ecu in ecu_map.items():
 
 df_report = pd.DataFrame(report)
 
+# Log ECU status to Firebase
 if not df_report.empty:
-    # Log ECU status to Firebase
     try:
         log_to_firebase(vehicle_name, df_report)
     except Exception:
         pass
 
-    st.success("✅ Diagnostics completed!")
-    st.subheader("📋 ECU Status")
-    st.dataframe(df_report, use_container_width=True)
+st.success("✅ Diagnostics completed!")
+st.subheader("📋 ECU Status")
+st.dataframe(df_report, use_container_width=True)
 
-    # Root Cause Analysis (presence)
-    st.subheader("🧠 Root Cause Analysis")
-    root_causes = infer_root_causes(df_report)
-    if root_causes:
-        for cause in root_causes:
-            st.markdown(
-                f"""<div style='background:#fffbe6; border-left:5px solid #faad14; padding:10px; margin-bottom:10px;'>
-                <b>{cause['Type']}</b>: <code>{cause['Component']}</code><br>
-                Missing: {cause['Missing']} / {cause['Total']} — Confidence: {cause['Confidence']}%
-                <br>ECUs: {', '.join(cause['Affected ECUs'])}</div>""",
-                unsafe_allow_html=True
-            )
-    else:
-        st.info("No root-cause candidates found (no missing ECUs).")
+# Root Cause Analysis (presence)
+st.subheader("🧠 Root Cause Analysis")
+root_causes = infer_root_causes(df_report)
+if root_causes:
+    for cause in root_causes:
+        st.markdown(
+            f"""<div style='background:#fffbe6; border-left:5px solid #faad14; padding:10px; margin-bottom:10px;'>
+            <b>{cause['Type']}</b>: <code>{cause['Component']}</code><br>
+            Missing: {cause['Missing']} / {cause['Total']} — Confidence: {cause['Confidence']}%
+            <br>ECUs: {', '.join(cause['Affected ECUs'])}</div>""",
+            unsafe_allow_html=True
+        )
+else:
+    st.info("No root-cause candidates found (no missing ECUs).")
 
-    # PDF report
-    pdf_buf = generate_pdf_buffer(report, vehicle_name)
-    st.download_button("⬇️ Download PDF Report", pdf_buf, f"{vehicle_name}_diagnostics.pdf", "application/pdf")
+# PDF report
+pdf_buf = generate_pdf_buffer(report, vehicle_name)
+st.download_button("⬇️ Download PDF Report", pdf_buf, f"{vehicle_name}_diagnostics.pdf", "application/pdf")
 
-    # Detailed ECU diagnostics for missing ECUs
-    st.subheader("🔧 Detailed ECU Diagnostics")
-    for _, row in df_report[df_report["Status"] == "❌ MISSING"].iterrows():
-        st.markdown(generate_detailed_diagnosis(row["ECU"]), unsafe_allow_html=True)
+# Detailed ECU diagnostics for missing ECUs
+st.subheader("🔧 Detailed ECU Diagnostics")
+for _, row in df_report[df_report["Status"] == "❌ MISSING"].iterrows():
+    st.markdown(generate_detailed_diagnosis(row["ECU"]), unsafe_allow_html=True)
 
-    # Visual Reference slides
-    st.markdown("---")
-    st.markdown("### 🖼️ Diagnostic Visual Reference")
-    slide_map = {
-        "Connector 3": [12],
-        "Connector 4": [3],
-        "89E": [5, 6, 7, 8, 9],
-        "Cabin Interface Connector (Brown)": [4],
-        "F47": [6],
-        "F46": [6],
-        "F42": [3],
-        "F43": [3],
-        "F52": [3],
-        "ABS ECU": [12],
-        "Telematics": [4],
-        "Instrument Cluster": [5, 6, 7],
-        "Engine ECU": [3],
-        "Gear Shift Lever": [3],
-        "TCU": [3],
-        "LNG Sensor 1": [3],
-        "LNG Sensor 2": [3],
-        "Retarder Controller": [3]
-    }
-
-    def get_slide_path(slide_num: int):
-        candidates = [
-            os.path.join("Electrical Wiring", f"Slide{slide_num}.PNG"),
-            os.path.join("Electrical Wiring", f"Slide{slide_num}.png"),
-            os.path.join("static_images", f"Slide{slide_num}.PNG"),
-            os.path.join("static_images", f"Slide{slide_num}.png"),
-        ]
-        for p in candidates:
-            if os.path.exists(p):
-                return p
+# -------------------------
+# CLEAN DM1 TABLE HELPERS
+# -------------------------
+def _sa_to_int(sa):
+    if sa is None:
+        return None
+    if isinstance(sa, str) and sa.lower().startswith("0x"):
+        try:
+            return int(sa, 16)
+        except Exception:
+            return None
+    try:
+        return int(sa)
+    except Exception:
         return None
 
-    missing_slides = set()
-    for row in report:
-        if row["Status"] == "❌ MISSING":
-            for key in [row["ECU"], row["Connector"], row["Fuse"]]:
-                missing_slides.update(slide_map.get(key, []))
-
-    if missing_slides:
-        st.success("📌 Relevant slides for missing ECUs: " + ", ".join(f"Slide {s}" for s in sorted(missing_slides)))
-        for slide_num in sorted(missing_slides):
-            slide_path = get_slide_path(slide_num)
-            if slide_path:
-                st.image(slide_path, caption=f"Slide {slide_num}", use_container_width=True)
+def _lamp_summary(row):
+    pieces = []
+    def add(label, on, flash, rate):
+        if on is True:
+            if flash:
+                pieces.append(f"{label} ({(rate or 'FLASH').title()})")
             else:
-                st.warning(f"⚠️ Slide {slide_num} image not found in 'Electrical Wiring' or 'static_images'.")
-    else:
-        st.info("✅ No ECUs are missing — all components appear functional.")
-
-    # -------------------------
-    # CLEAN DM1 TABLE HELPERS
-    # -------------------------
-    def _sa_to_int(sa):
-        if sa is None:
-            return None
-        if isinstance(sa, str) and sa.lower().startswith("0x"):
-            try:
-                return int(sa, 16)
-            except Exception:
-                return None
-        try:
-            return int(sa)
-        except Exception:
-            return None
-
-    def _lamp_summary(row):
-        pieces = []
-        def add(label, on, flash, rate):
-            if on is True:
-                if flash:
-                    pieces.append(f"{label} ({(rate or 'FLASH').title()})")
+                if not rate or str(rate).upper() in ("NONE", "STEADY"):
+                    pieces.append(f"{label} (steady)")
                 else:
-                    if not rate or str(rate).upper() in ("NONE", "STEADY"):
-                        pieces.append(f"{label} (steady)")
-                    else:
-                        pieces.append(f"{label} ({str(rate).title()})")
-        add("MIL", row.get("MIL"), row.get("MIL Flash"), row.get("MIL Flash Rate"))
-        add("RSL", row.get("RSL"), row.get("RSL Flash"), row.get("RSL Flash Rate"))
-        add("AWL", row.get("AWL"), row.get("AWL Flash"), row.get("AWL Flash Rate"))
-        add("PL",  row.get("PL"),  row.get("PL Flash"),  row.get("PL Flash Rate"))
-        return ", ".join(pieces) if pieces else "—"
+                    pieces.append(f"{label} ({str(rate).title()})")
+    add("MIL", row.get("MIL"), row.get("MIL Flash"), row.get("MIL Flash Rate"))
+    add("RSL", row.get("RSL"), row.get("RSL Flash"), row.get("RSL Flash Rate"))
+    add("AWL", row.get("AWL"), row.get("AWL Flash"), row.get("AWL Flash Rate"))
+    add("PL",  row.get("PL"),  row.get("PL Flash"),  row.get("PL Flash Rate"))
+    return ", ".join(pieces) if pieces else "—"
 
-    def _severity_rank(row):
-        if row.get("MIL") is True: return 0
-        if row.get("RSL") is True: return 1
-        if row.get("AWL") is True: return 2
-        if row.get("PL")  is True: return 3
-        return 4
+def _severity_rank(row):
+    if row.get("MIL") is True: return 0
+    if row.get("RSL") is True: return 1
+    if row.get("AWL") is True: return 2
+    if row.get("PL")  is True: return 3
+    return 4
 
-    def clean_dm1_table(raw: pd.DataFrame) -> pd.DataFrame:
-        """
-        - Adds ECU column from Source Address
-        - Collapses lamp columns into a single 'Lamp' summary
-        - Creates 'SPN/FMI' view column
-        - Ranks & de-duplicates: keep worst-severity + highest OC per (SA, SPN, FMI)
-        - Orders columns for readability
-        """
-        if raw is None or raw.empty:
-            return raw
+def clean_dm1_table(raw: pd.DataFrame) -> pd.DataFrame:
+    """
+    - Adds ECU column from Source Address
+    - Collapses lamp columns into a single 'Lamp' summary
+    - Creates 'SPN/FMI' view column
+    - Ranks & de-duplicates: keep worst-severity + highest OC per (SA, SPN, FMI)
+    - Orders columns for readability
+    """
+    if raw is None or raw.empty:
+        return raw
 
-        df = raw.copy()
+    df = raw.copy()
+    df["SA_int"] = df["Source Address"].apply(_sa_to_int)
+    df["ECU"] = df["SA_int"].apply(lambda x: ecu_map.get(x, f"SA 0x{x:02X}" if x is not None else "Unknown"))
+    df["Lamp"] = df.apply(_lamp_summary, axis=1)
+    df["Severity"] = df.apply(_severity_rank, axis=1)
 
-        # Add SA_int and ECU name
-        df["SA_int"] = df["Source Address"].apply(_sa_to_int)
-        df["ECU"] = df["SA_int"].apply(lambda x: ecu_map.get(x, f"SA 0x{x:02X}" if x is not None else "Unknown"))
+    for c in ("SPN", "FMI", "OC"):
+        if c in df.columns:
+            df[c] = pd.to_numeric(df[c], errors="coerce")
 
-        # Lamp summary + severity
-        df["Lamp"] = df.apply(_lamp_summary, axis=1)
-        df["Severity"] = df.apply(_severity_rank, axis=1)
+    df["SPN/FMI"] = df.apply(
+        lambda r: f"{int(r['SPN'])}/{int(r['FMI'])}" if pd.notna(r["SPN"]) and pd.notna(r["FMI"]) else "—",
+        axis=1
+    )
 
-        # Normalize numeric SPN/FMI/OC for sorting/formatting
-        for c in ("SPN", "FMI", "OC"):
-            if c in df.columns:
-                df[c] = pd.to_numeric(df[c], errors="coerce")
+    sort_cols = ["Severity", "OC"]
+    ascending = [True, False]
+    if "Time" in df.columns:
+        sort_cols.append("Time")
+        ascending.append(False)
+    df = df.sort_values(sort_cols, ascending=ascending)
+    df = df.drop_duplicates(subset=["SA_int", "SPN", "FMI"], keep="first").reset_index(drop=True)
 
-        # Human-friendly combined code
-        df["SPN/FMI"] = df.apply(
-            lambda r: f"{int(r['SPN'])}/{int(r['FMI'])}" if pd.notna(r["SPN"]) and pd.notna(r["FMI"]) else "—",
-            axis=1
-        )
+    preferred = [
+        "Time", "ECU", "Source Address",
+        "SPN", "FMI", "OC", "SPN/FMI",
+        "DTC", "Title", "Description", "Error Class",
+        "Lamp", "Assembled", "Workshop Actions"
+    ]
+    existing = [c for c in preferred if c in df.columns]
+    df_view = df[existing].copy()
 
-        # Sort: severity (MIL first), then OC desc, then Time desc if available
-        sort_cols = ["Severity", "OC"]
-        ascending = [True, False]
-        if "Time" in df.columns:
-            sort_cols.append("Time")
-            ascending.append(False)
-        df = df.sort_values(sort_cols, ascending=ascending)
+    if "Assembled" in df_view.columns:
+        df_view["Assembled"] = df_view["Assembled"].map({True: "TP/BAM", False: "—"}).fillna("—")
+    for col in ("Title", "Description", "Error Class", "DTC"):
+        if col in df_view.columns:
+            df_view[col] = df_view[col].fillna("—").replace("", "—")
 
-        # Deduplicate: keep the most severe + highest OC per SA/SPN/FMI
-        df = df.drop_duplicates(subset=["SA_int", "SPN", "FMI"], keep="first").reset_index(drop=True)
+    df_view = df_view.rename(columns={
+        "OC": "Occurrences",
+        "DTC": "DTC Code",
+        "Error Class": "Severity Class",
+    })
+    return df_view
 
-        # Choose clean column order
-        preferred = [
-            "Time", "ECU", "Source Address",
-            "SPN", "FMI", "OC", "SPN/FMI",
-            "DTC", "Title", "Description", "Error Class",
-            "Lamp", "Assembled", "Workshop Actions"
-        ]
-        existing = [c for c in preferred if c in df.columns]
-        df_view = df[existing].copy()
+# -------------------------
+# DTC decoding + UI + Firebase upload
+# -------------------------
+st.markdown("---")
+st.subheader("🚨 Active Diagnostic Trouble Codes (DM1)")
+raw_dtcs = decode_dtcs_from_df(df_can)
+if raw_dtcs.empty:
+    st.info("No active DM1 DTCs detected.")
+else:
+    cleaned = clean_dm1_table(raw_dtcs)
+    try:
+        st.dataframe(cleaned, use_container_width=True, hide_index=True)
+    except Exception:
+        st.dataframe(cleaned, use_container_width=True)
 
-        # Pretty fallbacks
-        if "Assembled" in df_view.columns:
-            df_view["Assembled"] = df_view["Assembled"].map({True: "TP/BAM", False: "—"}).fillna("—")
-        for col in ("Title", "Description", "Error Class", "DTC"):
-            if col in df_view.columns:
-                df_view[col] = df_view[col].fillna("—").replace("", "—")
+    st.download_button(
+        "⬇️ Download DTC Report (CSV)",
+        cleaned.to_csv(index=False),
+        f"{vehicle_name}_dtc_report.csv",
+        "text/csv"
+    )
 
-        # Nicer headers
-        df_view = df_view.rename(columns={
-            "OC": "Occurrences",
-            "DTC": "DTC Code",
-            "Error Class": "Severity Class",
-        })
+    try:
+        log_dtcs_to_firebase(vehicle_name, raw_dtcs=raw_dtcs, cleaned_dtcs=cleaned)
+        st.success("☁️ DTCs uploaded to Firebase.")
+    except Exception as e:
+        st.warning(f"⚠️ Unable to upload DTCs to Firebase: {e}")
 
-        return df_view
+# -------------------------
+# Wiring PDF parsing UI
+# -------------------------
+st.markdown("---")
+st.subheader("📑 Auto-parse Wiring PDFs (Grounds & Connector Pins)")
 
-    # -------------------------
-    # DTC decoding + UI + Firebase upload
-    # -------------------------
-    st.markdown("---")
-    st.subheader("🚨 Active Diagnostic Trouble Codes (DM1)")
-    raw_dtcs = decode_dtcs_from_df(df_can)
-    if raw_dtcs.empty:
-        st.info("No active DM1 DTCs detected.")
+available = list_available_drawings()
+selected = st.multiselect("Select drawings to parse", options=available, default=available)
+parse_now = st.button("🔎 Parse selected PDFs")
+if parse_now and selected:
+    extraction = parse_pdfs_for_grounds_and_mappings(selected)
+    st.session_state["wiring_extraction"] = extraction
+    try:
+        log_wiring_extraction(vehicle_name, extraction)
+    except Exception:
+        pass
+    st.success(f"Parsed {len(selected)} file(s). Found {len(extraction['grounds'])} ground labels and {len(extraction['conn_pin_ground'])} conn-pin mappings.")
+
+# Show extraction summary
+extraction = st.session_state.get("wiring_extraction")
+if extraction:
+    st.markdown("**Ground labels found (by file/page):**")
+    for g, hits in sorted(extraction["grounds"].items()):
+        parts = [f"{os.path.basename(h['file'])} p.{h['page']}" for h in hits]
+        st.write(f"- {g}: " + ", ".join(parts))
+    st.markdown("**Connector Pin → Ground hits:**")
+    if extraction["conn_pin_ground"]:
+        df_hits = pd.DataFrame(extraction["conn_pin_ground"])
+        st.dataframe(df_hits, use_container_width=True)
     else:
-        cleaned = clean_dm1_table(raw_dtcs)
-        try:
-            st.dataframe(
-                cleaned,
-                use_container_width=True,
-                hide_index=True
-            )
-        except Exception:
-            st.dataframe(cleaned, use_container_width=True)
+        st.write("—")
 
-        st.download_button(
-            "⬇️ Download DTC Report (CSV)",
-            cleaned.to_csv(index=False),
-            f"{vehicle_name}_dtc_report.csv",
-            "text/csv"
-        )
+# Build dynamic ground map from extraction
+dynamic_ground_map = {}
+if extraction:
+    dynamic_ground_map = build_dynamic_ground_map(ecu_connector_map, extraction)
+st.session_state["dynamic_ground_map"] = dynamic_ground_map
 
-        # Upload DTCs to Firebase (raw + cleaned)
-        try:
-            log_dtcs_to_firebase(vehicle_name, raw_dtcs=raw_dtcs, cleaned_dtcs=cleaned)
-            st.success("☁️ DTCs uploaded to Firebase.")
-        except Exception as e:
-            st.warning(f"⚠️ Unable to upload DTCs to Firebase: {e}")
+def get_ground_for_ecu(ecu_name: str):
+    # prefer parsed ground mapping; fallback to default
+    dgm = st.session_state.get("dynamic_ground_map") or {}
+    return dgm.get(ecu_name, ground_map_default.get(ecu_name, "-"))
 
-    # -------------------------
-    # Wiring & Ground Health Heuristics (clusters + behavior)
-    # -------------------------
-    # FMI groups (wiring-related)
-    FMI_SHORT_TO_BATT = {3}   # Voltage above normal or shorted to battery
-    FMI_SHORT_TO_GND  = {4}   # Voltage below normal or shorted to ground
-    FMI_OPEN_CIRCUIT  = {5}   # Current below normal or open circuit
-    FMI_OVER_CURRENT  = {6}   # Current above normal or grounded circuit
+# -------------------------
+# Wiring & Ground Health Heuristics
+# -------------------------
+st.markdown("---")
+st.subheader("⚡ Wiring & Ground Health Heuristics")
 
-    SPN_BATTERY_POTENTIAL = 168  # (optional reference; lightweight sampler below)
+# FMI groups (wiring-related)
+FMI_SHORT_TO_BATT = {3}
+FMI_SHORT_TO_GND  = {4}
+FMI_OPEN_CIRCUIT  = {5}
+FMI_OVER_CURRENT  = {6}
 
-    def extract_battery_voltage_stats(df_can: pd.DataFrame):
-        """Lightweight sampler for SPN 168 in PGN 0xFEF7 (if present)."""
-        if df_can.empty:
-            return None
-        volt_samples = []
-        for _, r in df_can.iterrows():
-            can_id = r.get("CAN ID")
-            data = r.get("Data")
-            if not isinstance(data, (bytes, bytearray)) or can_id is None:
-                continue
-            pgn = (int(can_id) >> 8) & 0xFFFF
-            if pgn == 0xFEF7 and len(data) >= 2:
-                raw = data[0] | (data[1] << 8)
-                if raw not in (0xFF, 0xFE, 0xFFFF):
-                    volt_samples.append(raw * 0.05)  # 0.05 V/bit
-        if not volt_samples:
-            return None
-        return {
-            "min_v": round(min(volt_samples), 2),
-            "max_v": round(max(volt_samples), 2),
-            "avg_v": round(sum(volt_samples)/len(volt_samples), 2),
-            "n": len(volt_samples),
-        }
+def extract_battery_voltage_stats(df_can: pd.DataFrame):
+    """Lightweight sampler for SPN 168 in PGN 0xFEF7 (if present)."""
+    if df_can.empty:
+        return None
+    volt_samples = []
+    for _, r in df_can.iterrows():
+        can_id = r.get("CAN ID")
+        data = r.get("Data")
+        if not isinstance(data, (bytes, bytearray)) or can_id is None:
+            continue
+        pgn = (int(can_id) >> 8) & 0xFFFF
+        if pgn == 0xFEF7 and len(data) >= 2:
+            raw = data[0] | (data[1] << 8)
+            if raw not in (0xFF, 0xFE, 0xFFFF):
+                volt_samples.append(raw * 0.05)  # 0.05 V/bit
+    if not volt_samples:
+        return None
+    return {"min_v": round(min(volt_samples), 2), "max_v": round(max(volt_samples), 2),
+            "avg_v": round(sum(volt_samples)/len(volt_samples), 2), "n": len(volt_samples)}
 
-    def detect_addr_flapping(df_can: pd.DataFrame, gap_seconds: float = 3.0):
-        """
-        Detect ECUs that repeatedly disappear/reappear (loose contact/ground symptoms).
-        Heuristic: gaps between frames from the same SA inside a short capture.
-        """
-        if df_can.empty or "Timestamp" not in df_can.columns:
-            return {}
-        flaps = {}
-        grp = df_can.dropna(subset=["Timestamp"]).groupby(df_can["Source Address"])
-        for sa, g in grp:
-            ts = sorted([t for t in g["Timestamp"].tolist() if isinstance(t, (int, float))])
-            if len(ts) < 2:
-                continue
-            gaps = sum(1 for i in range(1, len(ts)) if (ts[i] - ts[i-1]) > gap_seconds)
-            if gaps >= 2:
-                flaps[int(sa)] = {"gaps": gaps, "first": ts[0], "last": ts[-1]}
-        return flaps
+def detect_addr_flapping(df_can: pd.DataFrame, gap_seconds: float = 3.0):
+    if df_can.empty or "Timestamp" not in df_can.columns:
+        return {}
+    flaps = {}
+    grp = df_can.dropna(subset=["Timestamp"]).groupby(df_can["Source Address"])
+    for sa, g in grp:
+        ts = sorted([t for t in g["Timestamp"].tolist() if isinstance(t, (int, float))])
+        if len(ts) < 2:
+            continue
+        gaps = sum(1 for i in range(1, len(ts)) if (ts[i] - ts[i-1]) > gap_seconds)
+        if gaps >= 2:
+            flaps[int(sa)] = {"gaps": gaps, "first": ts[0], "last": ts[-1]}
+    return flaps
 
-    def analyze_wiring_health(df_presence: pd.DataFrame,
-                              raw_dtcs_df: pd.DataFrame,
-                              df_can: pd.DataFrame,
-                              vehicle_name: str):
-        """Cluster/behavior findings (shared fuse/connector/harness/ground; flapping; low voltage)."""
-        findings = []
-        if df_presence is None or df_presence.empty:
-            return findings
+def analyze_wiring_health(df_presence: pd.DataFrame, raw_dtcs_df: pd.DataFrame, df_can: pd.DataFrame):
+    findings = []
+    if df_presence is None or df_presence.empty:
+        return findings, {}
 
-        missing = df_presence[df_presence["Status"] == "❌ MISSING"].copy()
-        if "ECU" in missing.columns:
-            missing["Ground"] = missing["ECU"].map(lambda e: ground_map.get(e, "-"))
-        else:
-            missing["Ground"] = "-"
+    # Build presence + harness + dynamic ground
+    presence = df_presence.copy()
+    presence["Harness"] = presence["ECU"].map(lambda e: ecu_connector_map.get(e, {}).get("harness", "-"))
+    presence["Ground"] = presence["ECU"].map(lambda e: get_ground_for_ecu(e))
 
-        # ensure Harness in presence df
-        if "Harness" not in df_presence.columns:
-            df_presence = df_presence.copy()
-            df_presence["Harness"] = df_presence["ECU"].map(lambda e: ecu_connector_map.get(e, {}).get("harness", "-"))
-            if not missing.empty:
-                missing["Harness"] = missing["ECU"].map(lambda e: ecu_connector_map.get(e, {}).get("harness", "-"))
+    missing = presence[presence["Status"] == "❌ MISSING"].copy()
 
-        def cluster_findings(by_col: str, label: str, base_weight: int = 50):
-            grp = missing.groupby(by_col)
-            for key, g in grp:
-                if key in (None, "-", "", "—"):
-                    continue
-                affected = g["ECU"].tolist()
-                total_in_zone = sum(1 for row in df_presence.itertuples()
-                                    if (getattr(row, by_col, None) == key))
-                conf = int(round((len(affected) / (total_in_zone or 1)) * base_weight + 25))
-                findings.append({
-                    "type": f"Power/CAN path issue around {label}",
-                    "component": key,
-                    "confidence": min(conf, 95),
-                    "evidence": {
-                        "affected_ecus": affected,
-                        "missing_count": len(affected),
-                        "zone_total": total_in_zone
-                    }
-                })
-
-        if not missing.empty:
-            cluster_findings("Fuse", "Fuse", base_weight=60)
-            cluster_findings("Connector", "Connector", base_weight=55)
-            cluster_findings("Harness", "Harness", base_weight=50)
-            cluster_findings("Ground", "Ground", base_weight=65)
-
-        # DTC-based group hints
-        def _sa_name(sa_str):
-            try:
-                if isinstance(sa_str, str) and sa_str.startswith("0x"):
-                    sa_int = int(sa_str, 16)
-                else:
-                    sa_int = int(sa_str)
-                return ecu_map.get(sa_int, f"SA 0x{sa_int:02X}")
-            except Exception:
-                return str(sa_str)
-
-        if raw_dtcs_df is not None and not raw_dtcs_df.empty:
-            by_fmi = defaultdict(list)
-            for _, r in raw_dtcs_df.iterrows():
-                by_fmi[int(r.get("FMI")) if pd.notna(r.get("FMI")) else -1].append(_sa_name(r.get("Source Address")))
-            if any(f in by_fmi for f in FMI_SHORT_TO_BATT):
-                findings.append({"type":"DTC pattern: Short to Battery (FMI 3)","component":"Multiple","confidence":65,"evidence":{"ecus":sorted(set(sum((by_fmi[f] for f in FMI_SHORT_TO_BATT if f in by_fmi), [])))}})
-            if any(f in by_fmi for f in FMI_SHORT_TO_GND):
-                findings.append({"type":"DTC pattern: Short to Ground/Low V (FMI 4)","component":"Multiple","confidence":65,"evidence":{"ecus":sorted(set(sum((by_fmi[f] for f in FMI_SHORT_TO_GND if f in by_fmi), [])))}})
-            if any(f in by_fmi for f in FMI_OPEN_CIRCUIT):
-                findings.append({"type":"DTC pattern: Open Circuit (FMI 5)","component":"Multiple","confidence":60,"evidence":{"ecus":sorted(set(sum((by_fmi[f] for f in FMI_OPEN_CIRCUIT if f in by_fmi), [])))}})
-            if any(f in by_fmi for f in FMI_OVER_CURRENT):
-                findings.append({"type":"DTC pattern: Over Current/Grounded (FMI 6)","component":"Multiple","confidence":60,"evidence":{"ecus":sorted(set(sum((by_fmi[f] for f in FMI_OVER_CURRENT if f in by_fmi), [])))}})
-
-        # Behavior-based: flapping & low voltage
-        flap = detect_addr_flapping(df_can)
-        if flap:
-            affected = []
-            for sa_int, meta in flap.items():
-                ecu = ecu_map.get(sa_int, f"SA 0x{sa_int:02X}")
-                affected.append(f"{ecu} (gaps={meta['gaps']})")
+    def cluster_findings(by_col: str, label: str, base_weight: int = 50):
+        grp = missing.groupby(by_col)
+        for key, g in grp:
+            if key in (None, "-", "", "—"): continue
+            affected = g["ECU"].tolist()
+            total_in_zone = sum(1 for row in presence.itertuples() if getattr(row, by_col, None) == key)
+            conf = int(round((len(affected) / (total_in_zone or 1)) * base_weight + 25))
             findings.append({
-                "type": "Intermittent connectivity (possible loose power/ground)",
-                "component": "Multiple ECUs",
-                "confidence": 70,
-                "evidence": {"flapping": affected}
+                "type": f"Power/CAN path issue around {label}",
+                "component": key,
+                "confidence": min(conf, 95),
+                "evidence": {"affected_ecus": affected, "missing_count": len(affected), "zone_total": total_in_zone}
             })
 
-        vstats = extract_battery_voltage_stats(df_can)
-        if vstats and vstats["min_v"] <= 10.5:
-            findings.append({
-                "type": "System Voltage Low",
-                "component": "Vehicle Power Supply",
-                "confidence": 65 if vstats["min_v"] > 9.5 else 80,
-                "evidence": vstats
-            })
+    if not missing.empty:
+        cluster_findings("Fuse", "Fuse", 60)
+        cluster_findings("Connector", "Connector", 55)
+        cluster_findings("Harness", "Harness", 50)
+        cluster_findings("Ground", "Ground", 70)
 
-        findings.sort(key=lambda x: (-x["confidence"], x["type"]))
-        return findings, {"flap": flap, "voltage": vstats}
+    # DTC patterns
+    def _sa_name(sa_str):
+        try:
+            if isinstance(sa_str, str) and sa_str.startswith("0x"):
+                sa_int = int(sa_str, 16)
+            else:
+                sa_int = int(sa_str)
+            return ecu_map.get(sa_int, f"SA 0x{sa_int:02X}")
+        except Exception:
+            return str(sa_str)
 
-    # ---- Per-DTC Wiring Fault Analyzer (uses topology + drawings) ----
-    def _zone_for_ecu(ecu_name: str):
-        m = ecu_connector_map.get(ecu_name, {}) or {}
-        return {
-            "Connector": m.get("connector", "-"),
-            "Fuse": m.get("fuse", "-"),
-            "Harness": m.get("harness", "-"),
-            "Ground": ground_map.get(ecu_name, "-"),
-            "Drawing": (
-                drawing_map.get(m.get("connector","")) or
-                drawing_map.get(m.get("fuse","")) or
-                drawing_map.get(m.get("harness","")) or
-                drawing_map.get(ground_map.get(ecu_name,""), None)
-            )
-        }
-
-    def infer_wiring_faults(raw_dtcs_df: pd.DataFrame) -> list:
-        """
-        For each DTC line, infer likely wiring issue and propose checks:
-        - Short to B+ (FMI 3), Short to GND (FMI 4), Open (FMI 5), Overcurrent (FMI 6).
-        Adds connector/fuse/harness/ground + drawing reference.
-        """
-        if raw_dtcs_df is None or raw_dtcs_df.empty:
-            return []
-        faults = []
-        seen = set()
+    if raw_dtcs_df is not None and not raw_dtcs_df.empty:
+        by_fmi = defaultdict(list)
         for _, r in raw_dtcs_df.iterrows():
-            spn = r.get("SPN")
             fmi = r.get("FMI")
-            sa = r.get("Source Address")
-            if pd.isna(spn) or pd.isna(fmi):
-                continue
-            # de-dupe per SA/SPN/FMI
-            key = (sa, int(spn), int(fmi))
-            if key in seen:
-                continue
-            seen.add(key)
+            if pd.notna(fmi):
+                by_fmi[int(fmi)].append(_sa_name(r.get("Source Address")))
+        if any(f in by_fmi for f in FMI_SHORT_TO_BATT):
+            findings.append({"type":"DTC pattern: Short to Battery (FMI 3)","component":"Multiple","confidence":65,"evidence":{"ecus":sorted(set(sum((by_fmi[f] for f in FMI_SHORT_TO_BATT if f in by_fmi), [])))}})
+        if any(f in by_fmi for f in FMI_SHORT_TO_GND):
+            findings.append({"type":"DTC pattern: Short to Ground/Low V (FMI 4)","component":"Multiple","confidence":65,"evidence":{"ecus":sorted(set(sum((by_fmi[f] for f in FMI_SHORT_TO_GND if f in by_fmi), [])))}})
+        if any(f in by_fmi for f in FMI_OPEN_CIRCUIT):
+            findings.append({"type":"DTC pattern: Open Circuit (FMI 5)","component":"Multiple","confidence":60,"evidence":{"ecus":sorted(set(sum((by_fmi[f] for f in FMI_OPEN_CIRCUIT if f in by_fmi), [])))}})
+        if any(f in by_fmi for f in FMI_OVER_CURRENT):
+            findings.append({"type":"DTC pattern: Over Current/Grounded (FMI 6)","component":"Multiple","confidence":60,"evidence":{"ecus":sorted(set(sum((by_fmi[f] for f in FMI_OVER_CURRENT if f in by_fmi), [])))}})
 
-            # map SA->ECU
-            try:
-                sa_int = int(sa, 16) if isinstance(sa, str) and sa.startswith("0x") else int(sa)
-            except Exception:
-                sa_int = None
-            ecu_name = ecu_map.get(sa_int, f"SA {sa}")
+    # Behavior: flapping + low voltage
+    flap = detect_addr_flapping(df_can)
+    if flap:
+        affected = []
+        for sa_int, meta in flap.items():
+            ecu = ecu_map.get(sa_int, f"SA 0x{sa_int:02X}")
+            affected.append(f"{ecu} (gaps={meta['gaps']})")
+        findings.append({"type":"Intermittent connectivity (possible loose power/ground)","component":"Multiple ECUs","confidence":70,"evidence":{"flapping": affected}})
 
-            zone = _zone_for_ecu(ecu_name)
-            checks = []
-            cause = "Electrical Fault"
-            confidence = 60
+    vstats = extract_battery_voltage_stats(df_can)
+    if vstats and vstats["min_v"] <= 10.5:
+        findings.append({"type":"System Voltage Low","component":"Vehicle Power Supply","confidence":65 if vstats['min_v']>9.5 else 80,"evidence":vstats})
 
-            if int(fmi) in FMI_SHORT_TO_BATT:
-                cause = "Short to Battery / High Voltage"
-                confidence = 70
-                checks += [
-                    f"Inspect signal wire chafing to +B on {zone['Harness']} (near bends/clips).",
-                    f"Backprobe at {zone['Connector']} for unexpected >VBAT on signal pin.",
-                    f"Check for moisture/corrosion in {zone['Connector']} causing bridge to supply."
-                ]
-            elif int(fmi) in FMI_SHORT_TO_GND:
-                cause = "Short to Ground / Low Voltage"
-                confidence = 70
-                checks += [
-                    f"Check continuity to chassis from signal pin at {zone['Connector']} (should be open).",
-                    f"Inspect rubbed-through insulation on {zone['Harness']} where it contacts metal.",
-                    f"Verify sensor supply present at {zone['Connector']} (key ON)."
-                ]
-            elif int(fmi) in FMI_OPEN_CIRCUIT:
-                cause = "Open Circuit / Loose Contact"
-                confidence = 65
-                checks += [
-                    f"Pin-tension & latch check at {zone['Connector']} (pull test, pin fit).",
-                    f"Continuity test sensor↔ECU over {zone['Harness']} (wiggle while measuring).",
-                    f"Inspect fuse {zone['Fuse']} seating and oxidation."
-                ]
-            elif int(fmi) in FMI_OVER_CURRENT:
-                cause = "Overcurrent / Grounded Circuit"
-                confidence = 65
-                checks += [
-                    f"Check for pin deformation/short in {zone['Connector']}.",
-                    f"Inspect branch splices on {zone['Harness']} for molten tape/shorts.",
-                    f"Verify sensor internal short (unplug sensor; see if DTC state changes)."
-                ]
+    findings.sort(key=lambda x: (-x["confidence"], x["type"]))
+    return findings, {"flap": flap, "voltage": vstats}
+
+def _zone_for_ecu(ecu_name: str):
+    m = ecu_connector_map.get(ecu_name, {}) or {}
+    return {
+        "Connector": m.get("connector", "-"),
+        "Fuse": m.get("fuse", "-"),
+        "Harness": m.get("harness", "-"),
+        "Ground": get_ground_for_ecu(ecu_name),
+        "Drawing": (
+            drawing_map.get(m.get("connector","")) or
+            drawing_map.get(m.get("fuse","")) or
+            drawing_map.get(m.get("harness","")) or
+            None
+        )
+    }
+
+def infer_wiring_faults(raw_dtcs_df: pd.DataFrame) -> list:
+    if raw_dtcs_df is None or raw_dtcs_df.empty:
+        return []
+    FMI_SHORT_TO_BATT = {3}
+    FMI_SHORT_TO_GND  = {4}
+    FMI_OPEN_CIRCUIT  = {5}
+    FMI_OVER_CURRENT  = {6}
+
+    faults = []
+    seen = set()
+    for _, r in raw_dtcs_df.iterrows():
+        spn = r.get("SPN"); fmi = r.get("FMI"); sa = r.get("Source Address")
+        if pd.isna(spn) or pd.isna(fmi): continue
+        key = (sa, int(spn), int(fmi))
+        if key in seen: continue
+        seen.add(key)
+
+        try:
+            sa_int = int(sa, 16) if isinstance(sa, str) and sa.startswith("0x") else int(sa)
+        except Exception:
+            sa_int = None
+        ecu_name = ecu_map.get(sa_int, f"SA {sa}")
+        zone = _zone_for_ecu(ecu_name)
+
+        checks = []
+        cause = "Electrical Fault"; confidence = 60
+
+        if int(fmi) in FMI_SHORT_TO_BATT:
+            cause = "Short to Battery / High Voltage"; confidence = 70
+            checks += [
+                f"Inspect signal wire chafing to +B on {zone['Harness']} (near bends/clips).",
+                f"Backprobe at {zone['Connector']} for unexpected >VBAT on signal pin.",
+                f"Check moisture/corrosion in {zone['Connector']} causing bridge to supply."
+            ]
+        elif int(fmi) in FMI_SHORT_TO_GND:
+            cause = "Short to Ground / Low Voltage"; confidence = 70
+            checks += [
+                f"Check continuity to chassis from signal pin at {zone['Connector']} (should be open).",
+                f"Inspect rubbed-through insulation on {zone['Harness']} where it contacts metal.",
+                f"Verify sensor supply present at {zone['Connector']} (key ON).",
+                f"Torque & clean ground {zone['Ground']}."
+            ]
+        elif int(fmi) in FMI_OPEN_CIRCUIT:
+            cause = "Open Circuit / Loose Contact"; confidence = 65
+            checks += [
+                f"Pin-tension & latch check at {zone['Connector']} (pull test, pin fit).",
+                f"Continuity test sensor↔ECU over {zone['Harness']} (wiggle while measuring).",
+                f"Inspect fuse {zone['Fuse']} seating and oxidation.",
+                f"Clean and retorque ground {zone['Ground']}."
+            ]
+        elif int(fmi) in FMI_OVER_CURRENT:
+            cause = "Overcurrent / Grounded Circuit"; confidence = 65
+            checks += [
+                f"Check for pin deformation/short in {zone['Connector']}.",
+                f"Inspect branch splices on {zone['Harness']} for melted tape/shorts.",
+                f"Unplug suspect sensor/actuator; recheck if DTC state changes."
+            ]
+        else:
+            cause = "General Circuit Fault"; confidence = 55
+            checks += [
+                f"Verify supply and ground at {zone['Connector']} (key ON).",
+                f"Inspect {zone['Harness']} for crush, pinch, or water ingress.",
+            ]
+
+        # Enrich with parsed connector-pin→ground info (exact pins)
+        extraction = st.session_state.get("wiring_extraction") or {}
+        pin_hints = []
+        if extraction and "conn_pin_ground" in extraction:
+            conn_lower = (zone['Connector'] or "").strip().lower()
+            for hit in extraction["conn_pin_ground"]:
+                hconn = (hit.get("connector") or "").strip().lower()
+                if not hconn: continue
+                if conn_lower and (conn_lower in hconn or hconn in conn_lower):
+                    # Prefer matching ground if available
+                    if not zone["Ground"] or (hit.get("ground") == zone["Ground"]):
+                        pin_hints.append(f"Pin {hit.get('pin')} → {hit.get('ground')} ({os.path.basename(hit.get('file',''))} p.{hit.get('page')})")
+        if pin_hints:
+            checks.append("Pin references: " + "; ".join(sorted(set(pin_hints))[:6]))
+
+        if zone["Drawing"]:
+            checks.append(f"Refer drawing: {zone['Drawing']} for pinout/route.")
+
+        faults.append({
+            "ECU": ecu_name,
+            "Source Address": sa,
+            "SPN": int(spn),
+            "FMI": int(fmi),
+            "Cause": cause,
+            "Confidence": confidence,
+            "Connector": zone["Connector"],
+            "Fuse": zone["Fuse"],
+            "Harness": zone["Harness"],
+            "Ground": zone["Ground"],
+            "Drawing": zone["Drawing"],
+            "Checks": checks
+        })
+    faults.sort(key=lambda x: (-x["Confidence"], x["ECU"], x["SPN"], x["FMI"]))
+    return faults
+
+# -------------------------
+# Analyze & display wiring health + per-DTC faults
+# -------------------------
+findings, extras = analyze_wiring_health(df_report, raw_dtcs if 'raw_dtcs' in globals() else pd.DataFrame(), df_can)
+
+if not findings:
+    st.info("No wiring/ground risk patterns detected from current trace and DTC set.")
+else:
+    for f in findings:
+        ev = f.get("evidence", {})
+        st.markdown(
+            f"""<div style='background:#f6ffed; border-left:5px solid #52c41a; padding:10px; margin-bottom:10px;'>
+            <b>{f['type']}</b><br>
+            Component/Zone: <code>{f['component']}</code><br>
+            Confidence: <b>{f['confidence']}%</b><br>
+            <i>Evidence:</i> {ev}
+            </div>""",
+            unsafe_allow_html=True
+        )
+
+st.subheader("🧰 Wiring Fault Analyzer (Per-DTC suggestions)")
+faults = infer_wiring_faults(raw_dtcs if 'raw_dtcs' in globals() else pd.DataFrame())
+if not faults:
+    st.info("No wiring-related DTC patterns found.")
+else:
+    for f in faults:
+        checks_html = "<br>".join([f"• {c}" for c in f["Checks"]])
+        st.markdown(
+            f"""<div style='background:#e6f4ff; border-left:5px solid #1677ff; padding:10px; margin-bottom:10px;'>
+            <b>{f['ECU']}</b> — SPN {f['SPN']}/FMI {f['FMI']}<br>
+            Cause: <b>{f['Cause']}</b> (Confidence {f['Confidence']}%)<br>
+            Connector: <code>{f['Connector']}</code> | Fuse: <code>{f['Fuse']}</code> |
+            Harness: <code>{f['Harness']}</code> | Ground: <code>{f['Ground']}</code><br>
+            Drawing: <code>{f['Drawing'] or '—'}</code><br>
+            <i>Suggested checks:</i><br>{checks_html}
+            </div>""",
+            unsafe_allow_html=True
+        )
+
+# Upload wiring results to Firebase
+try:
+    log_wiring_findings(vehicle_name, findings=findings, faults=faults, extracted=extraction if 'extraction' in globals() else st.session_state.get("wiring_extraction"))
+    st.success("☁️ Wiring/ground findings uploaded to Firebase.")
+except Exception as e:
+    st.warning(f"⚠️ Could not upload wiring/ground findings: {e}")
+
+# -------------------------
+# Ground map viewer (dynamic vs default)
+# -------------------------
+st.markdown("---")
+st.subheader("📍 Ground Map (Parsed vs Default)")
+g_rows = []
+for ecu in ecu_connector_map.keys():
+    d = ecu_connector_map.get(ecu, {})
+    g_rows.append({
+        "ECU": ecu,
+        "Connector": d.get("connector", "-"),
+        "Fuse": d.get("fuse", "-"),
+        "Harness": d.get("harness", "-"),
+        "Default Ground": ground_map_default.get(ecu, "—"),
+        "Parsed Ground": (st.session_state.get("dynamic_ground_map") or {}).get(ecu, "—"),
+        "Effective Ground": (st.session_state.get("dynamic_ground_map") or {}).get(ecu, ground_map_default.get(ecu, "—"))
+    })
+df_gmap = pd.DataFrame(g_rows)
+st.dataframe(df_gmap,use_container_width=True)
+
+# Export options
+col_a, col_b = st.columns(2)
+with col_a:
+    st.download_button(
+        "⬇️ Download Ground Map (CSV)",
+        df_gmap.to_csv(index=False),
+        file_name=f"{vehicle_name}_ground_map.csv",
+        mime="text/csv"
+    )
+with col_b:
+    _extraction_json = json.dumps(st.session_state.get("wiring_extraction", {}), indent=2, default=str)
+    st.download_button(
+        "⬇️ Download Parsed Wiring Extraction (JSON)",
+        _extraction_json,
+        file_name=f"{vehicle_name}_wiring_extraction.json",
+        mime="application/json"
+    )
+
+# -------------------------
+# Ground occurrences from PDFs (pages & rough coordinates)
+# -------------------------
+extraction = st.session_state.get("wiring_extraction", {})
+if extraction and extraction.get("grounds"):
+    st.markdown("### 📌 Ground Labels — Where Found in PDFs")
+    for g_label, hits in sorted(extraction["grounds"].items()):
+        with st.expander(f"{g_label} — {len(hits)} reference(s)"):
+            rows = []
+            for h in hits:
+                rows.append({
+                    "File": os.path.basename(h.get("file", "")),
+                    "Page": h.get("page"),
+                    "Coords (approx)": h.get("coords"),
+                    "Context": h.get("text_snippet", "")
+                })
+            if rows:
+                st.dataframe(pd.DataFrame(rows), use_container_width=True)
             else:
-                cause = "General Circuit Fault"
-                confidence = 55
-                checks += [
-                    f"Verify supply and ground at {zone['Connector']} (key ON).",
-                    f"Inspect {zone['Harness']} for crush, pinch, or water ingress.",
-                ]
+                st.write("—")
+else:
+    st.info("No parsed ground label occurrences to display. Use the **Parse selected PDFs** action above.")
 
-            # add drawing hint
-            if zone["Drawing"]:
-                checks.append(f"Refer drawing: {zone['Drawing']} for pinout/route.")
+# -------------------------
+# Wrap-up & tech tips
+# -------------------------
+st.markdown("---")
+st.markdown(
+    """
+**Tech tips for field checks**
+- If several ECUs share the same **Effective Ground** and are **❌ MISSING** or show FMI 4/5/6, prioritize that ground stud.
+- Use a voltage drop test across the ground strap while loads are active; >0.2V indicates excessive resistance.
+- For connectors mapped to a ground in the parsed PDFs, do a **pin-tension** check and inspect for moisture/corrosion.
+"""
+)
 
-            faults.append({
-                "ECU": ecu_name,
-                "Source Address": sa,
-                "SPN": int(spn),
-                "FMI": int(fmi),
-                "Cause": cause,
-                "Confidence": confidence,
-                "Connector": zone["Connector"],
-                "Fuse": zone["Fuse"],
-                "Harness": zone["Harness"],
-                "Ground": zone["Ground"],
-                "Drawing": zone["Drawing"],
-                "Checks": checks
-            })
-        # sort: higher confidence, then MIL carriers first if available
-        faults.sort(key=lambda x: (-x["Confidence"], x["ECU"], x["SPN"], x["FMI"]))
-        return faults
-
-    # Run cluster/behavior analysis + per-DTC fault inference
-    st.markdown("---")
-    st.subheader("⚡ Wiring & Ground Health Heuristics")
-    try:
-        findings, extras = analyze_wiring_health(df_report, raw_dtcs if 'raw_dtcs' in locals() else pd.DataFrame(), df_can, vehicle_name)
-        if not findings:
-            st.info("No wiring/ground risk patterns detected from current trace and DTC set.")
-        else:
-            for f in findings:
-                ev = f.get("evidence", {})
-                st.markdown(
-                    f"""<div style='background:#f6ffed; border-left:5px solid #52c41a; padding:10px; margin-bottom:10px;'>
-                    <b>{f['type']}</b><br>
-                    Component/Zone: <code>{f['component']}</code><br>
-                    Confidence: <b>{f['confidence']}%</b><br>
-                    <i>Evidence:</i> {ev}
-                    </div>""",
-                    unsafe_allow_html=True
-                )
-    except Exception as e:
-        st.warning(f"⚠️ Wiring/ground cluster analysis skipped due to error: {e}")
-        findings, extras = [], {}
-
-    # Per-DTC wiring fault hypotheses (actionable checks)
-    st.subheader("🧰 Wiring Fault Analyzer (Per-DTC suggestions)")
-    try:
-        faults = infer_wiring_faults(raw_dtcs if 'raw_dtcs' in locals() else pd.DataFrame())
-        if not faults:
-            st.info("No wiring-related DTC patterns found.")
-        else:
-            for f in faults:
-                checks_html = "<br>".join([f"• {c}" for c in f["Checks"]])
-                st.markdown(
-                    f"""<div style='background:#e6f4ff; border-left:5px solid #1677ff; padding:10px; margin-bottom:10px;'>
-                    <b>{f['ECU']}</b> — SPN {f['SPN']}/FMI {f['FMI']}<br>
-                    Cause: <b>{f['Cause']}</b> (Confidence {f['Confidence']}%)<br>
-                    Connector: <code>{f['Connector']}</code> | Fuse: <code>{f['Fuse']}</code> |
-                    Harness: <code>{f['Harness']}</code> | Ground: <code>{f['Ground']}</code><br>
-                    Drawing: <code>{f['Drawing'] or '—'}</code><br>
-                    <i>Suggested checks:</i><br>{checks_html}
-                    </div>""",
-                    unsafe_allow_html=True
-                )
-    except Exception as e:
-        st.warning(f"⚠️ Wiring Fault Analyzer skipped due to error: {e}")
-        faults = []
-
-    # Upload wiring results to Firebase
-    try:
-        log_wiring_findings(vehicle_name, findings=findings, faults=faults, extra=extras)
-        st.success("☁️ Wiring/ground findings uploaded to Firebase.")
-    except Exception as e:
-        st.warning(f"⚠️ Could not upload wiring/ground findings: {e}")
-
+# -------------------------
 # Footer
+# -------------------------
 st.markdown("---")
 st.markdown(
     """
@@ -1520,5 +1657,7 @@ st.markdown(
         All rights reserved.<br>
         This diagnostic tool and its associated materials are proprietary and intended for authorized diagnostic and engineering use only.
     </div>
-    """, unsafe_allow_html=True
+    """,
+    unsafe_allow_html=True
 )
+
