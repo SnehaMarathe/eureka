@@ -1,68 +1,31 @@
-# admin.py — EurekaCheck Admin Dashboard
-# - Mirrors Firebase init from app.py (Storage optional)
-# - Admin-only login
-# - Metrics: visitors, counts of logs/archives
-# - Browse & download: trace_archives (Storage or Firestore preview)
-# - Inspect: diagnostics_logs (presence) and diagnostics_dtcs (raw+cleaned)
-# - Reset visitor counter
+# admin.py — EurekaCheck Admin Console
+# - Uses same Firebase creds as app.py
+# - Read-only dashboards: Visitors, Trace Archives, Presence Logs, DTC Uploads
+# - Safe to run on Streamlit Cloud
 
 import streamlit as st
-import pandas as pd
-import json
 from datetime import datetime, timedelta
-import threading
+import pandas as pd
 import base64
-import re
 
-# Firebase
+# =========================
+# Firebase bootstrap
+# =========================
 import firebase_admin
 from firebase_admin import credentials, firestore
+
 try:
     from firebase_admin import storage as fb_storage
-    STORAGE_AVAILABLE = True
+    _STORAGE_OK = True
 except Exception:
-    STORAGE_AVAILABLE = False
+    _STORAGE_OK = False
 
-# -------------------------
-# Streamlit config
-# -------------------------
-st.set_page_config(page_title="EurekaCheck — Admin", layout="wide")
-
-# -------------------------
-# Authentication (admin only)
-# -------------------------
-USER_CREDENTIALS = {"admin": "admin123"}  # Only admin here
-
-def login():
-    st.markdown("## 🔐 Admin Login")
-    with st.form("login_form"):
-        username = st.text_input("Username", key="username_input_admin")
-        password = st.text_input("Password", type="password", key="password_input_admin")
-        submitted = st.form_submit_button("🔓 Login")
-        if submitted:
-            if username in USER_CREDENTIALS and USER_CREDENTIALS[username] == password:
-                st.session_state["authenticated_admin"] = True
-                st.session_state["username_admin"] = username
-                st.success(f"Welcome, {username}!")
-                st.rerun()
-            else:
-                st.error("❌ Invalid username or password.")
-
-if "authenticated_admin" not in st.session_state:
-    st.session_state["authenticated_admin"] = False
-if not st.session_state["authenticated_admin"]:
-    login()
-    st.stop()
-
-# -------------------------
-# Firebase init (same style as app.py)
-# -------------------------
 @st.cache_resource
-def init_firebase():
+def init_firebase_admin():
     try:
         firebase_config = st.secrets["FIREBASE"]
     except Exception:
-        st.error("❌ Firebase secrets missing. Add FIREBASE block to Streamlit secrets.")
+        st.error("❌ Firebase secrets missing in Streamlit secrets.")
         return None, None
 
     cred_dict = {
@@ -81,279 +44,302 @@ def init_firebase():
 
     bucket_name = firebase_config.get("storage_bucket")
     if not firebase_admin._apps:
-        if bucket_name and STORAGE_AVAILABLE:
+        if bucket_name and _STORAGE_OK:
             firebase_admin.initialize_app(
                 credentials.Certificate(cred_dict),
                 {"storageBucket": bucket_name}
             )
         else:
             firebase_admin.initialize_app(credentials.Certificate(cred_dict))
+
     db = firestore.client()
     bucket = None
-    if bucket_name and STORAGE_AVAILABLE:
+    if bucket_name and _STORAGE_OK:
         try:
             bucket = fb_storage.bucket()
         except Exception:
             bucket = None
     return db, bucket
 
-db, bucket = init_firebase()
-if db is None:
-    st.stop()
+db, bucket = init_firebase_admin()
 
-# -------------------------
-# Helpers
-# -------------------------
-def _count_collection(col_name: str, days: int | None = None) -> int:
-    try:
-        col_ref = db.collection(col_name)
-        if days:
-            since = datetime.utcnow() - timedelta(days=days)
-            return len([d for d in col_ref.where("timestamp", ">=", since.isoformat()).stream()])
-        return len([d for d in col_ref.stream()])
-    except Exception:
-        return 0
-
-def _docs_to_df(docs):
+# =========================
+# Helpers (no layout coupling)
+# =========================
+def docs_to_df(docs):
     rows = []
     for d in docs:
         rec = d.to_dict() or {}
         rec["_id"] = d.id
         rows.append(rec)
-    if not rows:
-        return pd.DataFrame()
     return pd.DataFrame(rows)
 
-def _get_visitor_count():
+def collection_count(col_name: str, days: int | None = None) -> int:
+    try:
+        ref = db.collection(col_name)
+        if days:
+            since = datetime.utcnow() - timedelta(days=days)
+            return len(list(ref.where("timestamp", ">=", since.isoformat()).stream()))
+        return len(list(ref.stream()))
+    except Exception:
+        return 0
+
+def get_visitor_count() -> int:
     try:
         doc = db.collection("visitors").document("counter").get()
-        if doc.exists:
-            return int(doc.to_dict().get("count", 0))
+        return int(doc.to_dict().get("count", 0)) if doc.exists else 0
     except Exception:
-        pass
-    return 0
+        return 0
 
-def _reset_visitor_count():
+def reset_visitor_count() -> bool:
     try:
         db.collection("visitors").document("counter").set({"count": 0})
         return True
     except Exception:
         return False
 
-def _signed_url_if_possible(storage_path: str, minutes: int = 20) -> str | None:
-    if not (bucket and STORAGE_AVAILABLE and storage_path):
+def query_trace_archives(time_cutoff_iso: str | None, limit: int = 500) -> pd.DataFrame:
+    try:
+        q = db.collection("trace_archives")
+        if time_cutoff_iso:
+            q = q.where("timestamp", ">=", time_cutoff_iso)
+        q = q.order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit)
+        return docs_to_df(list(q.stream()))
+    except Exception as e:
+        st.warning(f"trace_archives query failed: {e}")
+        return pd.DataFrame()
+
+def signed_url(storage_path: str, minutes: int = 20) -> str | None:
+    if not (bucket and _STORAGE_OK and storage_path):
         return None
     try:
         blob = bucket.blob(storage_path)
-        # This requires service account creds with signing ability
         return blob.generate_signed_url(expiration=timedelta(minutes=minutes), method="GET")
     except Exception:
         return None
 
-# -------------------------
-# Header
-# -------------------------
-st.markdown(
-    """
-    <div style='text-align: center;'>
-        <h2 style='margin-bottom: 0;'>🛠️ EurekaCheck — Admin Dashboard</h2>
-        <p style='margin-top: 0;'>Monitor archives, logs, DTCs, and visitor stats</p>
-    </div>
-    """,
-    unsafe_allow_html=True
-)
-st.markdown("<hr style='margin-top: 0.5rem;'>", unsafe_allow_html=True)
+def decode_preview_b64(preview_b64: str) -> bytes | None:
+    if not preview_b64:
+        return None
+    try:
+        return base64.b64decode(preview_b64.encode("ascii"))
+    except Exception:
+        return None
 
-# -------------------------
-# Top KPIs
-# -------------------------
-colA, colB, colC, colD = st.columns(4)
-with colA:
-    st.metric("👥 Visitors", _get_visitor_count())
-with colB:
-    st.metric("🧾 Presence Logs", _count_collection("diagnostics_logs"))
-with colC:
-    st.metric("⚠️ DTC Uploads", _count_collection("diagnostics_dtcs"))
-with colD:
-    st.metric("📦 Trace Archives", _count_collection("trace_archives"))
+def query_presence_logs(limit: int = 300) -> pd.DataFrame:
+    try:
+        q = db.collection("diagnostics_logs").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit)
+        return docs_to_df(list(q.stream()))
+    except Exception as e:
+        st.warning(f"diagnostics_logs query failed: {e}")
+        return pd.DataFrame()
 
-with st.expander("Visitor Counter Controls"):
-    if st.button("🔁 Reset counter to 0"):
-        ok = _reset_visitor_count()
-        if ok:
-            st.success("Visitor counter reset.")
-            st.rerun()
-        else:
-            st.error("Failed to reset counter.")
+def get_presence_log_records(doc_id: str) -> pd.DataFrame:
+    try:
+        d = db.collection("diagnostics_logs").document(doc_id).get()
+        if not d.exists:
+            return pd.DataFrame()
+        rec = d.to_dict() or {}
+        return pd.DataFrame(rec.get("records", []))
+    except Exception:
+        return pd.DataFrame()
 
-# -------------------------
-# Trace Archives
-# -------------------------
-st.markdown("## 📦 Trace Archives")
-st.caption("Shows either Cloud Storage path or Firestore preview (when Storage unavailable).")
+def query_dtc_uploads(limit: int = 300) -> pd.DataFrame:
+    try:
+        q = db.collection("diagnostics_dtcs").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit)
+        return docs_to_df(list(q.stream()))
+    except Exception as e:
+        st.warning(f"diagnostics_dtcs query failed: {e}")
+        return pd.DataFrame()
 
-time_filter = st.selectbox(
-    "Filter by timeframe",
-    ["All", "Last 24h", "Last 7d", "Last 30d"],
-    index=2
-)
-limit = st.slider("Max rows to fetch", min_value=50, max_value=2000, value=500, step=50)
+def get_dtc_payloads(doc_id: str):
+    try:
+        d = db.collection("diagnostics_dtcs").document(doc_id).get()
+        if not d.exists:
+            return pd.DataFrame(), pd.DataFrame()
+        rec = d.to_dict() or {}
+        return pd.DataFrame(rec.get("raw_dtcs", [])), pd.DataFrame(rec.get("cleaned_dtcs", []))
+    except Exception:
+        return pd.DataFrame(), pd.DataFrame()
 
-def _time_cutoff():
-    now = datetime.utcnow()
-    if time_filter == "Last 24h":
-        return now - timedelta(days=1)
-    if time_filter == "Last 7d":
-        return now - timedelta(days=7)
-    if time_filter == "Last 30d":
-        return now - timedelta(days=30)
-    return None
+def delete_doc(collection: str, doc_id: str) -> bool:
+    try:
+        db.collection(collection).document(doc_id).delete()
+        return True
+    except Exception:
+        return False
 
-cutoff = _time_cutoff()
-try:
-    q = db.collection("trace_archives")
-    if cutoff:
-        q = q.where("timestamp", ">=", cutoff.isoformat())
-    q = q.order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit)
-    docs = list(q.stream())
-    df_arch = _docs_to_df(docs)
-except Exception as e:
-    st.warning(f"Failed to query trace_archives: {e}")
-    df_arch = pd.DataFrame()
+# =========================
+# Admin UI (minimal, safe defaults)
+# =========================
+st.set_page_config(page_title="EurekaCheck — Admin", layout="wide")
+st.title("🛠️ EurekaCheck — Admin")
+
+if db is None:
+    st.stop()
+
+# --- Metrics row
+m1, m2, m3, m4 = st.columns(4)
+with m1:
+    st.metric("👥 Visitors (all-time)", get_visitor_count())
+with m2:
+    st.metric("📄 Presence Logs", collection_count("diagnostics_logs"))
+with m3:
+    st.metric("🚨 DTC Uploads", collection_count("diagnostics_dtcs"))
+with m4:
+    st.metric("🗂️ Trace Archives", collection_count("trace_archives"))
+
+st.divider()
+
+# --- Visitors controls
+with st.expander("Visitors"):
+    c1, c2 = st.columns([1,3])
+    with c1:
+        if st.button("Reset visitor counter"):
+            if reset_visitor_count():
+                st.success("Visitor counter reset.")
+            else:
+                st.error("Failed to reset.")
+    with c2:
+        st.write("Simple global counter stored in Firestore at `visitors/counter`.")
+
+st.divider()
+
+# --- Trace archives
+st.subheader("🗂️ Trace Archives")
+a1, a2, a3 = st.columns([1,1,2])
+with a1:
+    timeframe = st.selectbox("Timeframe", ["All", "Last 24h", "Last 7d", "Last 30d"], index=2)
+with a2:
+    limit_val = st.number_input("Limit", 50, 2000, 500, step=50)
+with a3:
+    st.caption("If Storage is configured, you’ll get a signed URL. Else, a base64 preview (first 64KB) is available.")
+
+cutoff = None
+if timeframe == "Last 24h":
+    cutoff = (datetime.utcnow() - timedelta(days=1)).isoformat()
+elif timeframe == "Last 7d":
+    cutoff = (datetime.utcnow() - timedelta(days=7)).isoformat()
+elif timeframe == "Last 30d":
+    cutoff = (datetime.utcnow() - timedelta(days=30)).isoformat()
+
+df_arch = query_trace_archives(cutoff, limit=limit_val)
 
 if df_arch.empty:
-    st.info("No archived traces found for the selected filter.")
+    st.info("No archives found for the selected filter.")
 else:
-    # Derive handy columns
-    if "timestamp" in df_arch.columns:
-        df_arch["timestamp"] = pd.to_datetime(df_arch["timestamp"], errors="coerce")
-    if "size_bytes" in df_arch.columns:
-        df_arch["size_kb"] = (pd.to_numeric(df_arch["size_bytes"], errors="coerce") / 1024).round(1)
-    cols_show = [c for c in [
-        "timestamp", "vehicle", "file", "storage_path", "size_kb", "size_bytes", "preview_b64_len", "_id"
-    ] if c in df_arch.columns]
-    st.dataframe(df_arch[cols_show], use_container_width=True)
+    show_cols = ["timestamp", "vehicle", "file", "size_bytes", "storage_path", "_id"]
+    for c in show_cols:
+        if c not in df_arch.columns:
+            df_arch[c] = ""
+    st.dataframe(df_arch[show_cols], use_container_width=True, hide_index=True)
 
-    # Download helper for a selected row
-    st.markdown("#### Download selection")
-    selected_id = st.selectbox("Pick an archive by document ID", options=df_arch["_id"].tolist())
-    if selected_id:
-        row = df_arch[df_arch["_id"] == selected_id].iloc[0].to_dict()
-        storage_path = row.get("storage_path")
-        preview_b64 = row.get("preview_b64")
-        filename = row.get("file") or "trace.trc"
-
-        # Try signed URL if we have Storage path
-        url = _signed_url_if_possible(storage_path)
+    st.markdown("**Download / Preview**")
+    sel = st.selectbox(
+        "Select archive row (by _id)",
+        options=[""] + df_arch["_id"].tolist(),
+        index=0
+    )
+    if sel:
+        row = df_arch[df_arch["_id"] == sel].iloc[0].to_dict()
+        url = signed_url(row.get("storage_path"))
         if url:
-            st.success("Signed URL generated (valid for a short time):")
-            st.write(url)
-        elif preview_b64:
-            try:
-                raw = base64.b64decode(preview_b64.encode("ascii"))
-                st.download_button("⬇️ Download preview chunk (.trc)", raw, filename=f"preview_{filename}")
-            except Exception as e:
-                st.warning(f"Unable to present preview: {e}")
+            st.write(f"[🔗 Signed download link (20 min)]({url})")
         else:
-            st.info("No Storage URL and no preview chunk available.")
+            # Try preview
+            preview_b64 = row.get("preview_b64", "")
+            chunk = decode_preview_b64(preview_b64)
+            if chunk:
+                fname = f"preview_{row.get('file','trace.trc')}"
+                st.download_button("⬇️ Download preview (first 64KB)", chunk, file_name=fname, mime="text/plain")
+            else:
+                st.warning("No Storage link and no preview available for this item.")
 
-# -------------------------
-# Presence Logs (diagnostics_logs)
-# -------------------------
-st.markdown("## 📋 ECU Presence Logs")
-limit_logs = st.slider("Max presence logs to fetch", min_value=50, max_value=2000, value=300, step=50)
-try:
-    ql = db.collection("diagnostics_logs").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit_logs)
-    docs_logs = list(ql.stream())
-    df_logs = _docs_to_df(docs_logs)
-except Exception as e:
-    st.warning(f"Failed to query diagnostics_logs: {e}")
-    df_logs = pd.DataFrame()
+st.divider()
 
+# --- Presence logs
+st.subheader("📄 Presence Logs (diagnostics_logs)")
+p1, p2 = st.columns([1,1])
+with p1:
+    limit_logs = st.number_input("Limit logs", 50, 1000, 300, step=50)
+with p2:
+    st.caption("Each log contains a `records` array of ECU presence rows.")
+
+df_logs = query_presence_logs(limit=limit_logs)
 if df_logs.empty:
     st.info("No presence logs found.")
 else:
-    if "timestamp" in df_logs.columns:
-        df_logs["timestamp"] = pd.to_datetime(df_logs["timestamp"], errors="coerce")
-    cols_basic = [c for c in ["timestamp", "vehicle", "user_info", "_id"] if c in df_logs.columns]
-    st.dataframe(df_logs[cols_basic], use_container_width=True)
+    keep = ["timestamp", "vehicle", "user_info", "_id"]
+    for c in keep:
+        if c not in df_logs.columns:
+            df_logs[c] = ""
+    st.dataframe(df_logs[keep], use_container_width=True, hide_index=True)
 
-    with st.expander("View a log's ECU table"):
-        sel = st.selectbox("Pick presence log by ID", options=df_logs["_id"].tolist())
-        if sel:
-            rec = next(d for d in docs_logs if d.id == sel).to_dict()
-            rows = rec.get("records", [])
-            df_rec = pd.DataFrame(rows)
-            if not df_rec.empty:
-                st.dataframe(df_rec, use_container_width=True)
-                st.download_button("⬇️ Download this ECU table (CSV)", df_rec.to_csv(index=False), file_name=f"{sel}_presence.csv")
-            else:
-                st.write("— No records in this log —")
+    sel_log = st.selectbox(
+        "Expand log (by _id)",
+        options=[""] + df_logs["_id"].tolist(),
+        index=0
+    )
+    if sel_log:
+        df_rec = get_presence_log_records(sel_log)
+        if df_rec.empty:
+            st.info("No records in this log.")
+        else:
+            st.dataframe(df_rec, use_container_width=True, hide_index=True)
 
-# -------------------------
-# DTC Uploads (diagnostics_dtcs)
-# -------------------------
-st.markdown("## ⚠️ DTC Uploads")
-limit_dtcs = st.slider("Max DTC uploads to fetch", min_value=50, max_value=2000, value=300, step=50, key="dtc_slider")
-try:
-    qd = db.collection("diagnostics_dtcs").order_by("timestamp", direction=firestore.Query.DESCENDING).limit(limit_dtcs)
-    docs_dtcs = list(qd.stream())
-    df_dtcs = _docs_to_df(docs_dtcs)
-except Exception as e:
-    st.warning(f"Failed to query diagnostics_dtcs: {e}")
-    df_dtcs = pd.DataFrame()
+st.divider()
 
+# --- DTC uploads
+st.subheader("🚨 DTC Uploads (diagnostics_dtcs)")
+d1, d2 = st.columns([1,1])
+with d1:
+    limit_dtcs = st.number_input("Limit DTC uploads", 50, 1000, 300, step=50)
+with d2:
+    st.caption("Inspect raw + cleaned DM1 payloads uploaded by clients.")
+
+df_dtcs = query_dtc_uploads(limit=limit_dtcs)
 if df_dtcs.empty:
     st.info("No DTC uploads found.")
 else:
-    if "timestamp" in df_dtcs.columns:
-        df_dtcs["timestamp"] = pd.to_datetime(df_dtcs["timestamp"], errors="coerce")
-    cols_basic = [c for c in ["timestamp", "vehicle", "user_info", "_id"] if c in df_dtcs.columns]
-    st.dataframe(df_dtcs[cols_basic], use_container_width=True)
+    keep = ["timestamp", "vehicle", "user_info", "_id"]
+    for c in keep:
+        if c not in df_dtcs.columns:
+            df_dtcs[c] = ""
+    st.dataframe(df_dtcs[keep], use_container_width=True, hide_index=True)
 
-    with st.expander("View a DTC upload"):
-        sel_d = st.selectbox("Pick DTC upload by ID", options=df_dtcs["_id"].tolist())
-        if sel_d:
-            rec = next(d for d in docs_dtcs if d.id == sel_d).to_dict()
-            raw_dtcs = pd.DataFrame(rec.get("raw_dtcs", []))
-            cleaned_dtcs = pd.DataFrame(rec.get("cleaned_dtcs", []))
-            st.markdown("**Raw DM1 rows**")
-            if raw_dtcs.empty:
-                st.write("—")
-            else:
-                st.dataframe(raw_dtcs, use_container_width=True)
-                st.download_button("⬇️ Download raw DM1 (CSV)", raw_dtcs.to_csv(index=False), file_name=f"{sel_d}_raw_dm1.csv")
-            st.markdown("**Cleaned report**")
-            if cleaned_dtcs.empty:
-                st.write("—")
-            else:
-                st.dataframe(cleaned_dtcs, use_container_width=True)
-                st.download_button("⬇️ Download cleaned DTCs (CSV)", cleaned_dtcs.to_csv(index=False), file_name=f"{sel_d}_cleaned_dtcs.csv")
-
-# -------------------------
-# Danger Zone (optional deletes)
-# -------------------------
-st.markdown("---")
-with st.expander("🧨 Danger Zone — Delete a document (advanced)"):
-    st.caption("Use with care. Deleting is permanent.")
-    target_col = st.selectbox("Collection", ["trace_archives", "diagnostics_logs", "diagnostics_dtcs", "visitors"])
-    target_id = st.text_input("Document ID (exact)")
-    if st.button("Delete document"):
-        if not target_id.strip():
-            st.error("Provide a document ID.")
+    sel_dtc = st.selectbox(
+        "Expand DTC upload (by _id)",
+        options=[""] + df_dtcs["_id"].tolist(),
+        index=0
+    )
+    if sel_dtc:
+        raw_df, cleaned_df = get_dtc_payloads(sel_dtc)
+        st.markdown("**Raw DM1 rows**")
+        if raw_df.empty:
+            st.write("—")
         else:
-            try:
-                db.collection(target_col).document(target_id).delete()
-                st.success(f"Deleted {target_col}/{target_id}")
-            except Exception as e:
-                st.error(f"Failed to delete: {e}")
+            st.dataframe(raw_df, use_container_width=True, hide_index=True)
+        st.markdown("**Cleaned DM1 table**")
+        if cleaned_df.empty:
+            st.write("—")
+        else:
+            st.dataframe(cleaned_df, use_container_width=True, hide_index=True)
 
-st.markdown("---")
-st.markdown(
-    """
-    <div style='text-align: center; font-size: 0.85em; color: gray;'>
-        © 2025 Blue Energy Motors. Admin dashboard for EurekaCheck.
-    </div>
-    """,
-    unsafe_allow_html=True
-)
+st.divider()
+
+# --- Danger zone (optional)
+with st.expander("🧨 Danger zone (delete single doc)"):
+    colz = st.columns(3)
+    with colz[0]:
+        coll = st.text_input("Collection", value="trace_archives")
+    with colz[1]:
+        docid = st.text_input("Doc _id to delete", value="")
+    with colz[2]:
+        if st.button("Delete"):
+            if not coll or not docid:
+                st.error("Collection and _id required.")
+            else:
+                if delete_doc(coll, docid):
+                    st.success("Deleted.")
+                else:
+                    st.error("Delete failed.")
