@@ -8,3 +8,7 @@ firebase-admin
 streamlit-javascript
 pdfplumber
 PyPDF2
+pdf2image
+pytesseract
+Pillow
+numpy
