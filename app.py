@@ -340,47 +340,57 @@ TP_DT_PGN = 0xEB00  # 60160 (TP.DT)
 
 # 2-bit decode maps per J1939-73
 _LAMP_CMD = {0b00: "OFF", 0b01: "ON", 0b10: "FLASH", 0b11: "N/A"}
-_FLASH_CODE = {0b00: "NONE", 0b01: "SLOW", 0b10: "FAST", 0b11: "N/A"}  # Byte 2 = flash status
+# Byte 2 = flash status (NONE/SLOW/FAST/N/A)
+_FLASH_CODE = {0b00: "NONE", 0b01: "SLOW", 0b10: "FAST", 0b11: "N/A"}
 
 def _lamp_bits(v: int, shift: int) -> int:
     return (v >> shift) & 0x03
 
 def parse_dm1_frame_with_lamp(data_bytes: bytes):
+    """
+    DM1 Byte 1 (lamp status): bits 7..6=MIL, 5..4=RSL, 3..2=AWL, 1..0=PL
+    DM1 Byte 2 (flash status): same ordering (NONE/SLOW/FAST/N/A)
+    Subsequent bytes: DTCs (4-byte blocks)
+    Returns: lamp (dict), dtcs (list)
+    """
     lamp = {
+        # booleans (ON includes steady or flashing)
         "MIL": None, "RSL": None, "AWL": None, "PL": None,
+        # flashing booleans
         "FlashMIL": None, "FlashRSL": None, "FlashAWL": None, "FlashPL": None,
+        # human-friendly command enum
         "MIL State": None, "RSL State": None, "AWL State": None, "PL State": None,
+        # flash status (NONE/SLOW/FAST/N/A)
         "MIL Flash Rate": None, "RSL Flash Rate": None, "AWL Flash Rate": None, "PL Flash Rate": None,
     }
     dtcs = []
+
     if not data_bytes:
         return lamp, dtcs
 
+    # --- Lamps ---
     b1 = data_bytes[0] if len(data_bytes) >= 1 else 0xFF
     b2 = data_bytes[1] if len(data_bytes) >= 2 else 0xFF
 
-    # *** Correct bit ordering per J1939-73 ***
-    # Byte 1 (status): MIL[7..6], RSL[5..4], AWL[3..2], PL[1..0]
+    # Correct bit ordering per J1939-73 (MSB->LSB)
     mil_cmd = _lamp_bits(b1, 6)
     rsl_cmd = _lamp_bits(b1, 4)
     awl_cmd = _lamp_bits(b1, 2)
     pl_cmd  = _lamp_bits(b1, 0)
 
-    # Byte 2 (flash): same ordering (flash status)
     mil_fr = _lamp_bits(b2, 6)
     rsl_fr = _lamp_bits(b2, 4)
     awl_fr = _lamp_bits(b2, 2)
     pl_fr  = _lamp_bits(b2, 0)
 
-    # 'On' means lamp lit (steady or flashing). Use either status=ON/FLASH or flash!=NONE
-    def lit(cmd, fr): 
+    # 'On' means lamp lit (steady or flashing). Use either status=ON/FLASH or flash != NONE
+    def lit(cmd, fr):
         return (cmd in (0b01, 0b10)) or (fr in (0b01, 0b10))
 
     def flashing(fr, cmd):
         # Prefer explicit flash status in Byte 2; fall back to command == FLASH
         return fr in (0b01, 0b10) or (cmd == 0b10)
 
-    # Fill friendly fields
     lamp["MIL State"] = _LAMP_CMD.get(mil_cmd)
     lamp["RSL State"] = _LAMP_CMD.get(rsl_cmd)
     lamp["AWL State"] = _LAMP_CMD.get(awl_cmd)
@@ -398,23 +408,24 @@ def parse_dm1_frame_with_lamp(data_bytes: bytes):
 
     lamp["MIL Flash Rate"] = _FLASH_CODE.get(mil_fr)
     lamp["RSL Flash Rate"] = _FLASH_CODE.get(rsl_fr)
-    lamp["AWL Flash Rate"] = _FLASH_CODE.get(awl_fr)
-    lamp["PL Flash Rate"]  = _FLASH_CODE.get(pl_fr)
+    lamp["AWL Flash Rate"]  = _FLASH_CODE.get(awl_fr)
+    lamp["PL Flash Rate"]   = _FLASH_CODE.get(pl_fr)
 
-    # --- DTCs (unchanged) ---
+    # --- DTCs ---
     if len(data_bytes) <= 2:
         return lamp, dtcs
 
     available = len(data_bytes) - 2
     dtc_count = available // 4
+
     for i in range(dtc_count):
         offset = 2 + i * 4
         if offset + 3 >= len(data_bytes):
             break
-        b1d = data_bytes[offset]
-        b2d = data_bytes[offset + 1]
-        b3d = data_bytes[offset + 2]
-        b4d = data_bytes[offset + 3]
+        b1d = data_bytes[offset]       # SPN low 8
+        b2d = data_bytes[offset + 1]   # SPN next 8
+        b3d = data_bytes[offset + 2]   # SPN high 3 bits + FMI (low 5 bits)
+        b4d = data_bytes[offset + 3]   # CM (bit7) + OC (bits6..0)
 
         spn = int(b1d) | (int(b2d) << 8) | ((int(b3d) & 0xE0) << 11)
         fmi = int(b3d) & 0x1F
@@ -423,6 +434,7 @@ def parse_dm1_frame_with_lamp(data_bytes: bytes):
 
         if spn == 0 and fmi == 0 and oc == 0:
             continue
+
         dtcs.append({"SPN": spn, "FMI": fmi, "OC": oc, "CM": cm, "offset": offset})
 
     return lamp, dtcs
@@ -654,8 +666,8 @@ def decode_dtcs_from_df(df: pd.DataFrame) -> pd.DataFrame:
                 "PL Flash Rate": lamp.get("PL Flash Rate"),
             })
 
-        # If no DTCs but MIL indicates ON/FLASH, still report a lamp status row
-        if not dtcs and (lamp.get("MIL") is True):
+        # If no DTCs but any lamp indicates ON/FLASH, still report a lamp status row
+        if not dtcs and any(lamp.get(k) is True for k in ("MIL", "RSL", "AWL", "PL")):
             rows.append({
                 "Time": r.get("Timestamp"),
                 "Source Address": f"0x{(can_id & 0xFF):02X}",
@@ -666,7 +678,7 @@ def decode_dtcs_from_df(df: pd.DataFrame) -> pd.DataFrame:
                 "CM": None,
                 "DTC": "",
                 "Title": "",
-                "Description": "MIL active but no SPN/FMI blocks present",
+                "Description": "Lamp active but no SPN/FMI blocks present",
                 "Error Class": "",
                 "Workshop Actions": "",
                 "MIL": lamp.get("MIL"),
@@ -983,16 +995,139 @@ if not df_report.empty:
         st.info("✅ No ECUs are missing — all components appear functional.")
 
     # -------------------------
+    # CLEAN DM1 TABLE HELPERS
+    # -------------------------
+    def _sa_to_int(sa):
+        if sa is None:
+            return None
+        if isinstance(sa, str) and sa.lower().startswith("0x"):
+            try:
+                return int(sa, 16)
+            except Exception:
+                return None
+        try:
+            return int(sa)
+        except Exception:
+            return None
+
+    def _lamp_summary(row):
+        pieces = []
+        def add(label, on, flash, rate):
+            if on is True:
+                if flash:
+                    pieces.append(f"{label} ({(rate or 'FLASH').title()})")
+                else:
+                    if not rate or str(rate).upper() in ("NONE", "STEADY"):
+                        pieces.append(f"{label} (steady)")
+                    else:
+                        pieces.append(f"{label} ({str(rate).title()})")
+        add("MIL", row.get("MIL"), row.get("MIL Flash"), row.get("MIL Flash Rate"))
+        add("RSL", row.get("RSL"), row.get("RSL Flash"), row.get("RSL Flash Rate"))
+        add("AWL", row.get("AWL"), row.get("AWL Flash"), row.get("AWL Flash Rate"))
+        add("PL",  row.get("PL"),  row.get("PL Flash"),  row.get("PL Flash Rate"))
+        return ", ".join(pieces) if pieces else "—"
+
+    def _severity_rank(row):
+        if row.get("MIL") is True: return 0
+        if row.get("RSL") is True: return 1
+        if row.get("AWL") is True: return 2
+        if row.get("PL")  is True: return 3
+        return 4
+
+    def clean_dm1_table(raw: pd.DataFrame) -> pd.DataFrame:
+        """
+        - Adds ECU column from Source Address
+        - Collapses lamp columns into a single 'Lamp' summary
+        - Creates 'SPN/FMI' view column
+        - Ranks & de-duplicates: keep worst-severity + highest OC per (SA, SPN, FMI)
+        - Orders columns for readability
+        """
+        if raw is None or raw.empty:
+            return raw
+
+        df = raw.copy()
+
+        # Add SA_int and ECU name
+        df["SA_int"] = df["Source Address"].apply(_sa_to_int)
+        df["ECU"] = df["SA_int"].apply(lambda x: ecu_map.get(x, f"SA 0x{x:02X}" if x is not None else "Unknown"))
+
+        # Lamp summary + severity
+        df["Lamp"] = df.apply(_lamp_summary, axis=1)
+        df["Severity"] = df.apply(_severity_rank, axis=1)
+
+        # Normalize numeric SPN/FMI/OC for sorting/formatting
+        for c in ("SPN", "FMI", "OC"):
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors="coerce")
+
+        # Human-friendly combined code
+        df["SPN/FMI"] = df.apply(
+            lambda r: f"{int(r['SPN'])}/{int(r['FMI'])}" if pd.notna(r["SPN"]) and pd.notna(r["FMI"]) else "—",
+            axis=1
+        )
+
+        # Sort: severity (MIL first), then OC desc, then Time desc if available
+        sort_cols = ["Severity", "OC"]
+        ascending = [True, False]
+        if "Time" in df.columns:
+            sort_cols.append("Time")
+            ascending.append(False)
+        df = df.sort_values(sort_cols, ascending=ascending)
+
+        # Deduplicate: keep the most severe + highest OC per SA/SPN/FMI
+        df = df.drop_duplicates(subset=["SA_int", "SPN", "FMI"], keep="first").reset_index(drop=True)
+
+        # Choose clean column order
+        preferred = [
+            "Time", "ECU", "Source Address",
+            "SPN", "FMI", "OC", "SPN/FMI",
+            "DTC", "Title", "Description", "Error Class",
+            "Lamp", "Assembled", "Workshop Actions"
+        ]
+        existing = [c for c in preferred if c in df.columns]
+        df_view = df[existing].copy()
+
+        # Pretty fallbacks
+        if "Assembled" in df_view.columns:
+            df_view["Assembled"] = df_view["Assembled"].map({True: "TP/BAM", False: "—"}).fillna("—")
+        for col in ("Title", "Description", "Error Class", "DTC"):
+            if col in df_view.columns:
+                df_view[col] = df_view[col].fillna("—").replace("", "—")
+
+        # Nicer headers
+        df_view = df_view.rename(columns={
+            "OC": "Occurrences",
+            "DTC": "DTC Code",
+            "Error Class": "Severity Class",
+        })
+
+        return df_view
+
+    # -------------------------
     # DTC decoding section (uses latest JSON + WorkshopActions + corrected lamps)
     # -------------------------
     st.markdown("---")
     st.subheader("🚨 Active Diagnostic Trouble Codes (DM1)")
-    df_dtcs = decode_dtcs_from_df(df_can)
-    if df_dtcs.empty:
+    raw_dtcs = decode_dtcs_from_df(df_can)
+    if raw_dtcs.empty:
         st.info("No active DM1 DTCs detected.")
     else:
-        st.dataframe(df_dtcs, use_container_width=True)
-        st.download_button("⬇️ Download DTC Report (CSV)", df_dtcs.to_csv(index=False), f"{vehicle_name}_dtc_report.csv", "text/csv")
+        cleaned = clean_dm1_table(raw_dtcs)
+        try:
+            st.dataframe(
+                cleaned,
+                use_container_width=True,
+                hide_index=True
+            )
+        except Exception:
+            st.dataframe(cleaned, use_container_width=True)
+
+        st.download_button(
+            "⬇️ Download DTC Report (CSV)",
+            cleaned.to_csv(index=False),
+            f"{vehicle_name}_dtc_report.csv",
+            "text/csv"
+        )
 
 # Footer
 st.markdown("---")
@@ -1005,4 +1140,3 @@ st.markdown(
     </div>
     """, unsafe_allow_html=True
 )
-
