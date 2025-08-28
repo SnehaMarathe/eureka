@@ -19,6 +19,8 @@ import time
 import json
 import requests
 
+_ = None
+
 # Optional: PDF parsers for wiring drawings
 PDF_BACKEND = None
 try:
@@ -30,6 +32,14 @@ except Exception:
         PDF_BACKEND = "pypdf2"
     except Exception:
         PDF_BACKEND = None
+
+# --- OCR / PDF fallbacks (optional but recommended) ---
+try:
+    from pdf2image import convert_from_path
+    import pytesseract
+    OCR_AVAILABLE = True
+except Exception:
+    OCR_AVAILABLE = False
 
 # Firebase
 import firebase_admin
@@ -826,10 +836,18 @@ def generate_detailed_diagnosis(ecu_name: str):
 # -------------------------
 # Wiring PDF parsing (grounds & connector-pin→ground)
 # -------------------------
-GROUND_REGEX = re.compile(r"\bG(\d{2,4})\b", re.IGNORECASE)
+# Stricter ground label: exactly 3 digits (e.g., G101), avoid long IDs in title blocks
+GROUND_REGEX = re.compile(r"(?<![A-Z0-9-])G([1-9]\d{2})(?!\d)", re.IGNORECASE)
+
+# Alternate notations sometimes used in drawings
+GROUND_ALT_REGEXES = [
+    re.compile(r"(?<![A-Z0-9-])G-?([1-9]\d{2})(?!\d)", re.IGNORECASE),
+    re.compile(r"(?<![A-Z0-9-])GND[\s\-]*([1-9]\d{2})(?!\d)", re.IGNORECASE),
+]
+
 # Example connector/pin→ground pattern: "Connector 3 Pin 4 -> G201" or "89E pin 2 — G203"
 CONN_PIN_GROUND_REGEX = re.compile(
-    r"(?:(?:Conn(?:ector)?)[\s:]*|(?:\bC\b)?)([A-Za-z0-9\-_/ ]{1,20})\s*(?:pin|PIN|Pin)\s*([0-9]{1,3})[^A-Za-z0-9]+(G\d{2,4})",
+    r"(?:(?:Conn(?:ector)?)[\s:]*|(?:\bC\b)?)([A-Za-z0-9\-_/ ]{1,20})\s*(?:pin|PIN|Pin)\s*([0-9]{1,3})[^A-Za-z0-9]+(G[1-9]\d{2})\b",
     re.IGNORECASE
 )
 
@@ -861,32 +879,48 @@ def parse_pdfs_for_grounds_and_mappings(paths):
     if not paths:
         return results
 
+    def _emit_ground(num_str, text, words, file_path, page_idx, idx_start=None, idx_end=None):
+        g = f"G{num_str}"
+        if text:
+            s = max(0, (idx_start or 0) - 30)
+            e = min(len(text), (idx_end or 0) + 30)
+            snippet = text[s:e].replace("\n", " ")
+        else:
+            snippet = ""
+        bbox = None
+        # Try to locate exact token for coords
+        if words:
+            token = g.upper()
+            for w in words:
+                if (w.get("text", "").strip().upper() == token):
+                    bbox = (w.get("x0"), w.get("top"), w.get("x1"), w.get("bottom"))
+                    break
+        results["grounds"][g].append({
+            "file": file_path, "page": page_idx, "coords": bbox, "text_snippet": snippet
+        })
+
     for p in paths:
         try:
+            file_path = p
             if PDF_BACKEND == "pdfplumber":
-                with pdfplumber.open(p) as pdf:
+                import pdfplumber
+                with pdfplumber.open(file_path) as pdf:
                     for page_idx, page in enumerate(pdf.pages, start=1):
                         try:
                             words = page.extract_words(use_text_flow=True, keep_blank_chars=False)
                             text = page.extract_text() or ""
                         except Exception:
                             words, text = [], ""
-                        # Ground labels
+
+                        # Ground labels (primary)
                         for m in GROUND_REGEX.finditer(text):
-                            g = f"G{m.group(1)}"
-                            snippet_start = max(0, m.start() - 30)
-                            snippet_end = min(len(text), m.end() + 30)
-                            snippet = text[snippet_start:snippet_end].replace("\n", " ")
-                            bbox = None
-                            target = g
-                            for w in words or []:
-                                if w.get("text","").strip() == target:
-                                    bbox = (w.get("x0"), w.get("top"), w.get("x1"), w.get("bottom"))
-                                    break
-                            results["grounds"][g].append({
-                                "file": p, "page": page_idx, "coords": bbox, "text_snippet": snippet
-                            })
-                        # Connector/pin -> ground
+                            _emit_ground(m.group(1), text, words, file_path, page_idx, m.start(), m.end())
+                        # Ground labels (alternates)
+                        for alt in GROUND_ALT_REGEXES:
+                            for m in alt.finditer(text):
+                                _emit_ground(m.group(1), text, words, file_path, page_idx, m.start(), m.end())
+
+                        # Connector/pin -> ground (exact pattern)
                         for m in CONN_PIN_GROUND_REGEX.finditer(text):
                             connector = (m.group(1) or "").strip()
                             pin = m.group(2)
@@ -895,23 +929,46 @@ def parse_pdfs_for_grounds_and_mappings(paths):
                             ctx_end = min(len(text), m.end() + 40)
                             context = text[ctx_start:ctx_end].replace("\n", " ")
                             results["conn_pin_ground"].append({
-                                "file": p, "page": page_idx, "connector": connector, "pin": pin, "ground": ground, "context": context, "coords": None
+                                "file": file_path, "page": page_idx, "connector": connector, "pin": pin,
+                                "ground": ground, "context": context, "coords": None
                             })
+
+                        # Row-based mining (common in “Pin / Signal / Ground” tables)
+                        try:
+                            rows_by_y = defaultdict(list)
+                            for w in words or []:
+                                y = round(w.get("top", 0), 1)
+                                rows_by_y[y].append(w)
+                            for y, ws in rows_by_y.items():
+                                line = " ".join(w["text"] for w in sorted(ws, key=lambda z: z.get("x0", 0)))
+                                m = re.search(
+                                    r"(?:connector|conn)\s*([A-Za-z0-9\-_/ ]{1,20}).*?\bpin\b\s*([0-9]{1,3}).*?\b(G[1-9]\d{2})\b",
+                                    line, re.IGNORECASE
+                                )
+                                if m:
+                                    results["conn_pin_ground"].append({
+                                        "file": file_path, "page": page_idx,
+                                        "connector": m.group(1).strip(), "pin": m.group(2),
+                                        "ground": m.group(3).upper(), "context": line, "coords": None
+                                    })
+                        except Exception:
+                            pass
+
             elif PDF_BACKEND == "pypdf2":
-                reader = PdfReader(p)
+                from PyPDF2 import PdfReader
+                reader = PdfReader(file_path)
                 for page_idx, page in enumerate(reader.pages, start=1):
                     try:
                         text = page.extract_text() or ""
                     except Exception:
                         text = ""
+
                     for m in GROUND_REGEX.finditer(text):
-                        g = f"G{m.group(1)}"
-                        snippet_start = max(0, m.start() - 30)
-                        snippet_end = min(len(text), m.end() + 30)
-                        snippet = text[snippet_start:snippet_end].replace("\n", " ")
-                        results["grounds"][g].append({
-                            "file": p, "page": page_idx, "coords": None, "text_snippet": snippet
-                        })
+                        _emit_ground(m.group(1), text, None, file_path, page_idx, m.start(), m.end())
+                    for alt in GROUND_ALT_REGEXES:
+                        for m in alt.finditer(text):
+                            _emit_ground(m.group(1), text, None, file_path, page_idx, m.start(), m.end())
+
                     for m in CONN_PIN_GROUND_REGEX.finditer(text):
                         connector = (m.group(1) or "").strip()
                         pin = m.group(2)
@@ -920,14 +977,52 @@ def parse_pdfs_for_grounds_and_mappings(paths):
                         ctx_end = min(len(text), m.end() + 40)
                         context = text[ctx_start:ctx_end].replace("\n", " ")
                         results["conn_pin_ground"].append({
-                            "file": p, "page": page_idx, "connector": connector, "pin": pin, "ground": ground, "context": context, "coords": None
+                            "file": file_path, "page": page_idx, "connector": connector, "pin": pin,
+                            "ground": ground, "context": context, "coords": None
                         })
+
             else:
                 st.warning("⚠️ No PDF backend available. Install `pdfplumber` or `PyPDF2` to enable parsing.")
-                break
+
+            # OCR fallback (only if needed / available)
+            if OCR_AVAILABLE:
+                # If we found very few mappings, try OCR to scrape text from vector pages
+                low_hits = (sum(len(v) for v in results["grounds"].values()) < 3) and (len(results["conn_pin_ground"]) == 0)
+                if low_hits:
+                    try:
+                        images = convert_from_path(file_path, dpi=300)
+                        for page_idx, img in enumerate(images, start=1):
+                            ocr_text = pytesseract.image_to_string(img)
+
+                            for m in GROUND_REGEX.finditer(ocr_text):
+                                _emit_ground(m.group(1), ocr_text, None, file_path, page_idx, m.start(), m.end())
+                            for alt in GROUND_ALT_REGEXES:
+                                for m in alt.finditer(ocr_text):
+                                    _emit_ground(m.group(1), ocr_text, None, file_path, page_idx, m.start(), m.end())
+
+                            # Heuristic OCR connector/pin/ground lines
+                            for line in ocr_text.splitlines():
+                                if ("conn" in line.lower() or "connector" in line.lower()) and "pin" in line.lower() and "g" in line.lower():
+                                    m = re.search(
+                                        r"(?:connector|conn)\s*([A-Za-z0-9\-_/ ]{1,20}).*?(?:pin)\s*([0-9]{1,3}).*?(G-?\s*[1-9]\d{2})",
+                                        line, re.IGNORECASE
+                                    )
+                                    if m:
+                                        connector = m.group(1).strip()
+                                        pin = re.sub(r"\D", "", m.group(2))
+                                        ground = "G" + re.sub(r"\D", "", m.group(3))
+                                        results["conn_pin_ground"].append({
+                                            "file": file_path, "page": page_idx,
+                                            "connector": connector, "pin": pin, "ground": ground,
+                                            "context": line.strip(), "coords": None
+                                        })
+                    except Exception as e:
+                        st.warning(f"⚠️ OCR fallback failed for '{os.path.basename(file_path)}': {e}")
+
         except Exception as e:
-            st.warning(f"⚠️ Failed parsing '{p}': {e}")
+            st.warning(f"⚠️ Failed parsing '{os.path.basename(p)}': {e}")
             continue
+
     return results
 
 def build_dynamic_ground_map(ecu_connector_map, extraction):
@@ -1321,19 +1416,39 @@ def extract_battery_voltage_stats(df_can: pd.DataFrame):
     return {"min_v": round(min(volt_samples), 2), "max_v": round(max(volt_samples), 2),
             "avg_v": round(sum(volt_samples)/len(volt_samples), 2), "n": len(volt_samples)}
 
-def detect_addr_flapping(df_can: pd.DataFrame, gap_seconds: float = 3.0):
+def detect_addr_flapping(df_can: pd.DataFrame, gap_seconds: float = 3.0, min_msgs: int = 100, min_long_gaps: int = 5):
+    """
+    Robust flapping detector:
+    - Ignore sparse sources (< min_msgs frames)
+    - Count only gaps > gap_seconds
+    - Require long gaps to occupy >15% of capture duration
+    - Returns {sa_int: {gaps, first, last, median_gap}}
+    """
     if df_can.empty or "Timestamp" not in df_can.columns:
         return {}
     flaps = {}
-    grp = df_can.dropna(subset=["Timestamp"]).groupby(df_can["Source Address"])
-    for sa, g in grp:
+    df_ts = df_can.dropna(subset=["Timestamp"]).copy()
+    if df_ts.empty:
+        return flaps
+
+    for sa, g in df_ts.groupby("Source Address"):
         ts = sorted([t for t in g["Timestamp"].tolist() if isinstance(t, (int, float))])
-        if len(ts) < 2:
+        if len(ts) < min_msgs:
             continue
-        gaps = sum(1 for i in range(1, len(ts)) if (ts[i] - ts[i-1]) > gap_seconds)
-        if gaps >= 2:
-            flaps[int(sa)] = {"gaps": gaps, "first": ts[0], "last": ts[-1]}
+        gaps = [ts[i]-ts[i-1] for i in range(1, len(ts))]
+        long_gaps = [d for d in gaps if d > gap_seconds]
+        if not long_gaps:
+            continue
+        duration = max(1e-6, ts[-1] - ts[0])
+        if (sum(long_gaps) / duration) > 0.15 and len(long_gaps) >= min_long_gaps:
+            flaps[int(sa)] = {
+                "gaps": len(long_gaps),
+                "first": ts[0],
+                "last": ts[-1],
+                "median_gap": float(pd.Series(gaps).median())
+            }
     return flaps
+
 
 def analyze_wiring_health(df_presence: pd.DataFrame, raw_dtcs_df: pd.DataFrame, df_can: pd.DataFrame):
     findings = []
@@ -1657,6 +1772,7 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
 
 
