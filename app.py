@@ -1391,43 +1391,154 @@ else:
         st.warning(f"⚠️ Unable to upload DTCs to Firebase: {e}")
 
 # -------------------------
-# Wiring PDF parsing UI
+# Wiring PDF parsing UI (service-centric)
 # -------------------------
 st.markdown("---")
 st.subheader("📑 Auto-parse Wiring PDFs (Grounds & Connector Pins)")
-st.caption(f"📄 Using PDF backend: {PDF_BACKEND or 'none'}")
+st.caption(f"📄 Using PDF backend: {PDF_BACKEND or '— none —'}")
 
 available = list_available_drawings()
 selected = st.multiselect("Select drawings to parse", options=available, default=available)
 parse_now = st.button("🔎 Parse selected PDFs")
 if parse_now and selected:
     extraction = parse_pdfs_for_grounds_and_mappings(selected)
+    # Store raw extraction
     st.session_state["wiring_extraction"] = extraction
     try:
         log_wiring_extraction(vehicle_name, extraction)
     except Exception:
         pass
-    st.success(f"Parsed {len(selected)} file(s). Found {len(extraction['grounds'])} ground labels and {len(extraction['conn_pin_ground'])} conn-pin mappings.")
+    total_g = sum(len(v) for v in (extraction.get("grounds") or {}).values())
+    total_m = len(extraction.get("conn_pin_ground") or [])
+    st.success(f"Parsed {len(selected)} file(s). Found {total_g} ground labels and {total_m} conn-pin mappings.")
 
-# Show extraction summary
-extraction = st.session_state.get("wiring_extraction")
-if extraction:
-    st.markdown("**Ground labels found (by file/page):**")
-    for g, hits in sorted(extraction["grounds"].items()):
-        parts = [f"{os.path.basename(h['file'])} p.{h['page']}" for h in hits]
-        st.write(f"- {g}: " + ", ".join(parts))
-    st.markdown("**Connector Pin → Ground hits:**")
-    if extraction["conn_pin_ground"]:
-        df_hits = pd.DataFrame(extraction["conn_pin_ground"])
-        st.dataframe(df_hits, use_container_width=True)
-    else:
+extraction = st.session_state.get("wiring_extraction") or {}
+
+def _normalize_ground(g: str) -> str:
+    if not g: return ""
+    m = re.search(r"\bG([1-9]\d{2})\b", str(g), flags=re.IGNORECASE)
+    return f"G{m.group(1)}" if m else ""
+
+def _clean_conn_name(s: str) -> str:
+    s = (s or "").strip()
+    s = re.sub(r"\s", " ", s)
+    return s
+
+def _dedupe_hits(hits: list) -> pd.DataFrame:
+    if not hits: return pd.DataFrame(columns=["Connector","Pin","Ground","File","Page","Context"])
+    rows = []
+    for h in hits:
+        rows.append({
+            "Connector": _clean_conn_name(h.get("connector")),
+            "Pin": str(h.get("pin") or "").strip(),
+            "Ground": _normalize_ground(h.get("ground")),
+            "File": os.path.basename(h.get("file","")),
+            "Page": h.get("page"),
+            "Context": (h.get("context") or "").strip()
+        })
+    df = pd.DataFrame(rows)
+    # keep only sane grounds and non-empty connector/pin
+    df = df[(df["Ground"] != "") & (df["Connector"] != "") & (df["Pin"] != "")]
+    # de-duplicate
+    if not df.empty:
+        df = (df.sort_values(["Connector","Ground","Pin","File","Page"])
+                .drop_duplicates(subset=["Connector","Pin","Ground"], keep="first")
+                .reset_index(drop=True))
+    return df
+
+def _match_to_ecu(connector_label: str) -> str:
+    c = (connector_label or "").lower().replace("connector", "").strip()
+    for ecu, meta in ecu_connector_map.items():
+        ec = (meta.get("connector") or "").lower()
+        if not ec: continue
+        # exact or relaxed contains match
+        if ec == connector_label.lower() or c and (c in ec or ec.replace("connector","").strip() in connector_label.lower()):
+            return ecu
+    return ""
+
+def _build_ecu_effective_ground(df_hits: pd.DataFrame) -> tuple[dict, pd.DataFrame]:
+    # count grounds per ECU inferred from connector matches
+    votes = defaultdict(Counter)
+    for row in df_hits.itertuples(index=False):
+        ecu = _match_to_ecu(row.Connector)
+        if not ecu: continue
+        votes[ecu][row.Ground] = 1
+    dyn = {}
+    rows = []
+    for ecu in ecu_connector_map.keys():
+        default_g = ground_map_default.get(ecu, "—")
+        best = votes.get(ecu, Counter())
+        parsed = best.most_common(1)[0][0] if best else "—"
+        eff = parsed if parsed != "—" else default_g
+        total_votes = sum(best.values()) or 0
+        conf = 0
+        if total_votes:
+            top_votes = best[parsed]
+            conf = int(round(100 * top_votes / total_votes))
+        dyn[ecu] = parsed if parsed != "—" else None
+        rows.append({
+            "ECU": ecu,
+            "Connector": ecu_connector_map.get(ecu,{}).get("connector","-"),
+            "Default Ground": default_g,
+            "Parsed Ground": parsed,
+            "Effective Ground": eff,
+            "Confidence (%)": conf,
+            "Votes": total_votes
+        })
+    return dyn, pd.DataFrame(rows).sort_values(["Confidence (%)","Votes","ECU"], ascending=[False,False,True]).reset_index(drop=True)
+
+# 1) Clean connector→pin→ground hits (service-facing)
+df_hits_clean = _dedupe_hits((extraction.get("conn_pin_ground") or []))
+st.markdown("#### 🔌 Connector → Pin → Ground (clean)")
+if df_hits_clean.empty:
+    st.info("No connector/pin/ground mappings parsed.")
+else:
+    st.dataframe(df_hits_clean, use_container_width=True, hide_index=True)
+    st.download_button(
+        "⬇️ Download Connector–Pin–Ground (CSV)",
+        df_hits_clean.to_csv(index=False),
+        file_name=f"{vehicle_name}_connector_pin_ground.csv",
+        mime="text/csv"
+    )
+
+# 2) ECU Effective Ground table (with confidence)
+dyn_map, df_ecu_eff = _build_ecu_effective_ground(df_hits_clean)
+st.session_state["dynamic_ground_map"] = {k:v for k,v in dyn_map.items() if v}
+st.markdown("#### 🧭 ECU Ground Map (effective, confidence)")
+if df_ecu_eff.empty:
+    st.info("No ECU ground inferences available yet.")
+else:
+    st.dataframe(df_ecu_eff, use_container_width=True, hide_index=True)
+    st.download_button(
+        "⬇️ Download ECU Ground Map (CSV)",
+        df_ecu_eff.to_csv(index=False),
+        file_name=f"{vehicle_name}_ecu_effective_ground.csv",
+        mime="text/csv"
+    )
+
+# 3) Top ground check targets (groups ECUs by Effective Ground)
+st.markdown("#### 🎯 Top Ground Check Targets")
+if df_ecu_eff.empty:
+    st.write("—")
+else:
+    # use Effective Ground and keep rows where Effective Ground is a real Gxxx
+    df_targets = df_ecu_eff[df_ecu_eff["Effective Ground"].str.match(r"^G\d{3}$", na=False)].copy()
+    if df_targets.empty:
         st.write("—")
-
-# Build dynamic ground map from extraction
-dynamic_ground_map = {}
-if extraction:
-    dynamic_ground_map = build_dynamic_ground_map(ecu_connector_map, extraction)
-st.session_state["dynamic_ground_map"] = dynamic_ground_map
+    else:
+        summary = (df_targets.groupby("Effective Ground")
+                   .agg(ECUs=("ECU", lambda s: ", ".join(sorted(set(s)))),
+                        Count=("ECU","nunique"),
+                        AvgConfidence=("Confidence (%)","mean"))
+                   .reset_index()
+                   .sort_values(["Count","AvgConfidence"], ascending=[False,False]))
+        st.dataframe(summary, use_container_width=True, hide_index=True)
+        st.download_button(
+            "⬇️ Download Ground Targets (CSV)",
+            summary.to_csv(index=False),
+            file_name=f"{vehicle_name}_ground_targets.csv",
+            mime="text/csv"
+        )
 
 def get_ground_for_ecu(ecu_name: str):
     # prefer parsed ground mapping; fallback to default
@@ -1771,28 +1882,25 @@ with col_b:
         mime="application/json"
     )
 
-# -------------------------
-# Ground occurrences from PDFs (pages & rough coordinates)
-# -------------------------
-extraction = st.session_state.get("wiring_extraction", {})
-if extraction and extraction.get("grounds"):
-    st.markdown("### 📌 Ground Labels — Where Found in PDFs")
-    for g_label, hits in sorted(extraction["grounds"].items()):
-        with st.expander(f"{g_label} — {len(hits)} reference(s)"):
-            rows = []
-            for h in hits:
-                rows.append({
-                    "File": os.path.basename(h.get("file", "")),
-                    "Page": h.get("page"),
-                    "Coords (approx)": h.get("coords"),
-                    "Context": h.get("text_snippet", "")
-                })
-            if rows:
-                st.dataframe(pd.DataFrame(rows), use_container_width=True)
-            else:
-                st.write("—")
-else:
-    st.info("No parsed ground label occurrences to display. Use the **Parse selected PDFs** action above.")
++# (Optional) keep a compact raw view for engineers (collapsed by default)
++with st.expander("🔬 Raw ground label occurrences (engineering reference)", expanded=False):
++    if not extraction or not extraction.get("grounds"):
++        st.write("—")
++    else:
++        rows = []
++        for g_label, hits in sorted(extraction["grounds"].items()):
++            for h in hits:
++                rows.append({
++                    "Ground": g_label,
++                    "File": os.path.basename(h.get("file","")),
++                    "Page": h.get("page"),
++                    "Coords (approx)": h.get("coords"),
++                    "Context": h.get("text_snippet","")
++                })
++        if rows:
++            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
++        else:
++            st.write("—")
 
 # -------------------------
 # Wrap-up & tech tips
@@ -1821,5 +1929,6 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
 
