@@ -1,4 +1,4 @@
-# app.py — EurekaCheck Unified Diagnostic Tool (TP/BAM reassembly + DM1 with corrected lamp parsing)
+# app.py — EurekaCheck Unified Diagnostic Tool (TP/BAM reassembly + DM1 with corrected lamp parsing + Firebase DTC logging)
 import streamlit as st
 from streamlit_javascript import st_javascript
 import re
@@ -100,12 +100,10 @@ except Exception:
     db = None
 
 # -------------------------
-# Firebase logging & visitor counter helpers
+# Firebase logging helpers
 # -------------------------
-def log_to_firebase(vehicle_name: str, df: pd.DataFrame):
-    if db is None:
-        return
-    user_info = {
+def _current_user_info():
+    return {
         "ip": st.session_state.get("ip", "Unknown"),
         "city": st.session_state.get("city", "Unknown"),
         "region": st.session_state.get("region", "Unknown"),
@@ -113,16 +111,44 @@ def log_to_firebase(vehicle_name: str, df: pd.DataFrame):
         "latitude": st.session_state.get("latitude"),
         "longitude": st.session_state.get("longitude")
     }
+
+def log_to_firebase(vehicle_name: str, df: pd.DataFrame):
+    """Existing: ECU presence/status log."""
+    if db is None:
+        return
     data = {
         "vehicle": vehicle_name,
         "records": df.to_dict(orient="records"),
-        "user_info": user_info,
+        "user_info": _current_user_info(),
         "timestamp": datetime.now().isoformat()
     }
     try:
         db.collection("diagnostics_logs").add(data)
     except Exception as e:
         st.warning(f"⚠️ Firestore log failed: {e}")
+
+def log_dtcs_to_firebase(vehicle_name: str, raw_dtcs: pd.DataFrame = None, cleaned_dtcs: pd.DataFrame = None):
+    """
+    New: Upload DTCs to Firestore.
+    - Collection: diagnostics_dtcs
+    - Stores both raw decoded rows and cleaned table (if provided)
+    """
+    if db is None:
+        return
+    payload = {
+        "vehicle": vehicle_name,
+        "user_info": _current_user_info(),
+        "timestamp": datetime.now().isoformat()
+    }
+    if raw_dtcs is not None and not raw_dtcs.empty:
+        payload["raw_dtcs"] = raw_dtcs.to_dict(orient="records")
+    if cleaned_dtcs is not None and not cleaned_dtcs.empty:
+        payload["cleaned_dtcs"] = cleaned_dtcs.to_dict(orient="records")
+
+    try:
+        db.collection("diagnostics_dtcs").add(payload)
+    except Exception as e:
+        st.warning(f"⚠️ Firestore DTC upload failed: {e}")
 
 def update_visitor_count_firestore():
     if db is None:
@@ -223,7 +249,7 @@ with col3:
 st.markdown("<hr style='margin-top: 0.5rem;'>", unsafe_allow_html=True)
 
 # -------------------------
-# ECU connector map & drawing map (preserve your original mappings)
+# ECU connector map & drawing map
 # -------------------------
 ecu_connector_map = {
     "Engine ECU": {"connector": "Connector 4", "location": "Front left engine bay near pre-fuse box", "harness": "Front Chassis Wiring Harness", "fuse": "F42"},
@@ -907,7 +933,7 @@ for addr, ecu in ecu_map.items():
 df_report = pd.DataFrame(report)
 
 if not df_report.empty:
-    # Log to Firebase
+    # Log ECU status to Firebase
     try:
         log_to_firebase(vehicle_name, df_report)
     except Exception:
@@ -1104,7 +1130,7 @@ if not df_report.empty:
         return df_view
 
     # -------------------------
-    # DTC decoding section (uses latest JSON + WorkshopActions + corrected lamps)
+    # DTC decoding + UI + Firebase upload
     # -------------------------
     st.markdown("---")
     st.subheader("🚨 Active Diagnostic Trouble Codes (DM1)")
@@ -1128,6 +1154,13 @@ if not df_report.empty:
             f"{vehicle_name}_dtc_report.csv",
             "text/csv"
         )
+
+        # >>> Upload DTCs to Firebase (raw + cleaned) <<<
+        try:
+            log_dtcs_to_firebase(vehicle_name, raw_dtcs=raw_dtcs, cleaned_dtcs=cleaned)
+            st.success("☁️ DTCs uploaded to Firebase.")
+        except Exception as e:
+            st.warning(f"⚠️ Unable to upload DTCs to Firebase: {e}")
 
 # Footer
 st.markdown("---")
