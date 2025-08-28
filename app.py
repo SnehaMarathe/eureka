@@ -340,91 +340,81 @@ TP_DT_PGN = 0xEB00  # 60160 (TP.DT)
 
 # 2-bit decode maps per J1939-73
 _LAMP_CMD = {0b00: "OFF", 0b01: "ON", 0b10: "FLASH", 0b11: "N/A"}
-_FLASH_RATE = {0b00: "STEADY", 0b01: "SLOW", 0b10: "FAST", 0b11: "N/A"}
+_FLASH_CODE = {0b00: "NONE", 0b01: "SLOW", 0b10: "FAST", 0b11: "N/A"}  # Byte 2 = flash status
 
 def _lamp_bits(v: int, shift: int) -> int:
     return (v >> shift) & 0x03
 
 def parse_dm1_frame_with_lamp(data_bytes: bytes):
-    """
-    DM1 Byte 1: Lamp Command (2 bits per lamp) -> 00 OFF, 01 ON, 10 FLASH, 11 N/A
-    DM1 Byte 2: Flash Rate (2 bits per lamp) -> 00 STEADY, 01 SLOW, 10 FAST, 11 N/A
-    Subsequent bytes: DTCs (4-byte blocks)
-    Returns: lamp (dict), dtcs (list)
-    """
     lamp = {
-        # booleans (ON includes FLASH)
         "MIL": None, "RSL": None, "AWL": None, "PL": None,
-        # flashing booleans from command
         "FlashMIL": None, "FlashRSL": None, "FlashAWL": None, "FlashPL": None,
-        # human-friendly command enum
         "MIL State": None, "RSL State": None, "AWL State": None, "PL State": None,
-        # flash rate enum from byte 2
         "MIL Flash Rate": None, "RSL Flash Rate": None, "AWL Flash Rate": None, "PL Flash Rate": None,
     }
     dtcs = []
-
     if not data_bytes:
         return lamp, dtcs
 
-    # --- Lamps ---
     b1 = data_bytes[0] if len(data_bytes) >= 1 else 0xFF
     b2 = data_bytes[1] if len(data_bytes) >= 2 else 0xFF
 
-    # extract command per lamp
-    mil_cmd = _lamp_bits(b1, 0)
-    rsl_cmd = _lamp_bits(b1, 2)
-    awl_cmd = _lamp_bits(b1, 4)
-    pl_cmd  = _lamp_bits(b1, 6)
+    # *** Correct bit ordering per J1939-73 ***
+    # Byte 1 (status): MIL[7..6], RSL[5..4], AWL[3..2], PL[1..0]
+    mil_cmd = _lamp_bits(b1, 6)
+    rsl_cmd = _lamp_bits(b1, 4)
+    awl_cmd = _lamp_bits(b1, 2)
+    pl_cmd  = _lamp_bits(b1, 0)
 
-    # extract flash-rate per lamp
-    mil_fr = _lamp_bits(b2, 0)
-    rsl_fr = _lamp_bits(b2, 2)
-    awl_fr = _lamp_bits(b2, 4)
-    pl_fr  = _lamp_bits(b2, 6)
+    # Byte 2 (flash): same ordering (flash status)
+    mil_fr = _lamp_bits(b2, 6)
+    rsl_fr = _lamp_bits(b2, 4)
+    awl_fr = _lamp_bits(b2, 2)
+    pl_fr  = _lamp_bits(b2, 0)
 
-    def to_bool_on(cmd):  # ON includes FLASH
-        return cmd in (0b01, 0b10)
+    # 'On' means lamp lit (steady or flashing). Use either status=ON/FLASH or flash!=NONE
+    def lit(cmd, fr): 
+        return (cmd in (0b01, 0b10)) or (fr in (0b01, 0b10))
 
-    def to_bool_flash(cmd):  # flashing only when command == FLASH
-        return cmd == 0b10
+    def flashing(fr, cmd):
+        # Prefer explicit flash status in Byte 2; fall back to command == FLASH
+        return fr in (0b01, 0b10) or (cmd == 0b10)
 
-    # populate lamp dict
+    # Fill friendly fields
     lamp["MIL State"] = _LAMP_CMD.get(mil_cmd)
     lamp["RSL State"] = _LAMP_CMD.get(rsl_cmd)
     lamp["AWL State"] = _LAMP_CMD.get(awl_cmd)
     lamp["PL State"]  = _LAMP_CMD.get(pl_cmd)
 
-    lamp["MIL"] = to_bool_on(mil_cmd)
-    lamp["RSL"] = to_bool_on(rsl_cmd)
-    lamp["AWL"] = to_bool_on(awl_cmd)
-    lamp["PL"]  = to_bool_on(pl_cmd)
+    lamp["MIL"] = lit(mil_cmd, mil_fr)
+    lamp["RSL"] = lit(rsl_cmd, rsl_fr)
+    lamp["AWL"] = lit(awl_cmd, awl_fr)
+    lamp["PL"]  = lit(pl_cmd, pl_fr)
 
-    lamp["FlashMIL"] = to_bool_flash(mil_cmd)
-    lamp["FlashRSL"] = to_bool_flash(rsl_cmd)
-    lamp["FlashAWL"] = to_bool_flash(awl_cmd)
-    lamp["FlashPL"]  = to_bool_flash(pl_cmd)
+    lamp["FlashMIL"] = flashing(mil_fr, mil_cmd)
+    lamp["FlashRSL"] = flashing(rsl_fr, rsl_cmd)
+    lamp["FlashAWL"] = flashing(awl_fr, awl_cmd)
+    lamp["FlashPL"]  = flashing(pl_fr, pl_cmd)
 
-    lamp["MIL Flash Rate"] = _FLASH_RATE.get(mil_fr)
-    lamp["RSL Flash Rate"] = _FLASH_RATE.get(rsl_fr)
-    lamp["AWL Flash Rate"] = _FLASH_RATE.get(awl_fr)
-    lamp["PL Flash Rate"]  = _FLASH_RATE.get(pl_fr)
+    lamp["MIL Flash Rate"] = _FLASH_CODE.get(mil_fr)
+    lamp["RSL Flash Rate"] = _FLASH_CODE.get(rsl_fr)
+    lamp["AWL Flash Rate"] = _FLASH_CODE.get(awl_fr)
+    lamp["PL Flash Rate"]  = _FLASH_CODE.get(pl_fr)
 
-    # --- DTCs ---
+    # --- DTCs (unchanged) ---
     if len(data_bytes) <= 2:
         return lamp, dtcs
 
     available = len(data_bytes) - 2
     dtc_count = available // 4
-
     for i in range(dtc_count):
         offset = 2 + i * 4
         if offset + 3 >= len(data_bytes):
             break
-        b1d = data_bytes[offset]       # SPN low 8
-        b2d = data_bytes[offset + 1]   # SPN next 8
-        b3d = data_bytes[offset + 2]   # SPN high 3 bits + FMI (low 5 bits)
-        b4d = data_bytes[offset + 3]   # CM (bit7) + OC (bits6..0)
+        b1d = data_bytes[offset]
+        b2d = data_bytes[offset + 1]
+        b3d = data_bytes[offset + 2]
+        b4d = data_bytes[offset + 3]
 
         spn = int(b1d) | (int(b2d) << 8) | ((int(b3d) & 0xE0) << 11)
         fmi = int(b3d) & 0x1F
@@ -433,7 +423,6 @@ def parse_dm1_frame_with_lamp(data_bytes: bytes):
 
         if spn == 0 and fmi == 0 and oc == 0:
             continue
-
         dtcs.append({"SPN": spn, "FMI": fmi, "OC": oc, "CM": cm, "offset": offset})
 
     return lamp, dtcs
@@ -1016,3 +1005,4 @@ st.markdown(
     </div>
     """, unsafe_allow_html=True
 )
+
