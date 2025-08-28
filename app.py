@@ -1,6 +1,3 @@
-# Build the completed `app.py` and save it for download
-# app_code = r'''
-# app.py — EurekaCheck Unified Diagnostic Tool
 # TP/BAM reassembly + DM1 with corrected lamp parsing + Clean DM1 table
 # Firebase upload (ECU presence, DTCs) + Wiring/Ground Heuristics
 # + Wiring PDF parsing to extract ground labels and connector-pin→ground mappings
@@ -1660,5 +1657,6 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
 
