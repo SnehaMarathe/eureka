@@ -33,12 +33,9 @@ except Exception:
 st.set_page_config(page_title="EurekaCheck - CAN Diagnostic", layout="wide")
 
 # -------------------------
-# Config paths (adjust if needed)
+# Config (JSON-only lookup)
 # -------------------------
-EXCEL_DTC_PATH = "F300G810_FnR_T222BECDG8100033206_Trimmed_Signed.xlsx"
-EXCEL_SHEET = "Sheet1"
-EXCEL_HEADER_ROW = 3
-JSON_LOOKUP_PATH = "dtc_lookup_engine_abs_full.json"  # updated merged JSON (with WorkshopActions)
+JSON_LOOKUP_PATH = "dtc_lookup_engine_abs_full.json"  # unified Engine+ABS with WorkshopActions
 
 # -------------------------
 # Helper: Browser-based location (via JS)
@@ -344,17 +341,6 @@ TP_DT_PGN = 0xEB00  # 60160 (TP.DT)
 def parse_dm1_frame_with_lamp(data_bytes: bytes):
     """
     Parse DM1 payload strictly according to SAE J1939-73 (Version 4 layout).
-    - Byte 1 (index 0): Lamp status (2-bit fields for MIL, RSL, AWL, PL)
-    - Byte 2 (index 1): Flash bits (not required for DTC decoding but captured)
-    - Subsequent bytes: DTCs in 4-byte blocks:
-        Byte3 (index2): SPN low 8 bits
-        Byte4 (index3): SPN mid 8 bits
-        Byte5 (index4): SPN high 3 bits (bits 7-5) + FMI (bits 4-0)
-        Byte6 (index5): CM (bit7) + Occurrence Count (bits6-0)
-      Repeat each 4-byte DTC block for additional DTCs.
-    This approach uses the DTC count derived from payload length:
-        dtc_count = floor((len(data) - 2) / 4)
-    Returns: lamp_dict, list_of_dtcs
     """
     lamp = {"MIL": None, "RSL": None, "AWL": None, "PL": None, "FlashMIL": None, "FlashRSL": None, "FlashAWL": None, "FlashPL": None}
     dtcs = []
@@ -378,7 +364,7 @@ def parse_dm1_frame_with_lamp(data_bytes: bytes):
     except Exception:
         lamp["MIL"] = lamp["RSL"] = lamp["AWL"] = lamp["PL"] = None
 
-    # Flash byte (Byte2) - optional / informational
+    # Flash byte (Byte2)
     if len(data_bytes) >= 2:
         fb = data_bytes[1]
         lamp["FlashMIL"] = ((fb >> 0) & 0x03) == 1
@@ -386,7 +372,7 @@ def parse_dm1_frame_with_lamp(data_bytes: bytes):
         lamp["FlashAWL"] = ((fb >> 4) & 0x03) == 1
         lamp["FlashPL"]  = ((fb >> 6) & 0x03) == 1
 
-    # Determine how many DTC blocks exist (each DTC = 4 bytes per J1939-73)
+    # Determine count of 4-byte DTC blocks after first two bytes
     if len(data_bytes) <= 2:
         return lamp, dtcs
 
@@ -402,16 +388,12 @@ def parse_dm1_frame_with_lamp(data_bytes: bytes):
         b3 = data_bytes[offset + 2]   # SPN high 3 bits + FMI (low 5 bits)
         b4 = data_bytes[offset + 3]   # CM (bit7) + OC (bits6..0)
 
-        # SPN calculation (J1939-73): SPN = b1 + (b2 << 8) + ((b3 & 0xE0) << 11)
-        spn = int(b1) | (int(b2) << 8) | ((int(b3) & 0xE0) << 11)
-        # FMI is low 5 bits of b3
-        fmi = int(b3) & 0x1F
-        # Conversion method bit (top bit of b4)
-        cm = (int(b4) & 0x80) >> 7
-        # Occurrence Count is lower 7 bits
-        oc = int(b4) & 0x7F
+        spn = int(b1) | (int(b2) << 8) | ((int(b3) & 0xE0) << 11)  # SPN
+        fmi = int(b3) & 0x1F                                        # FMI
+        cm = (int(b4) & 0x80) >> 7                                  # Conversion Method
+        oc = int(b4) & 0x7F                                         # Occurrence Count
 
-        # If all zero -> no DTC present for this slot
+        # Skip empty slots
         if spn == 0 and fmi == 0 and oc == 0:
             continue
 
@@ -459,8 +441,6 @@ def assemble_tp_bam(df: pd.DataFrame):
                     "received": {},
                     "start_ts": ts
                 }
-            else:
-                continue
         elif pgn == TP_DT_PGN:
             if len(data) < 1:
                 continue
@@ -480,8 +460,6 @@ def assemble_tp_bam(df: pd.DataFrame):
                         "Timestamp": open_bams[sa]["start_ts"]
                     })
                     del open_bams[sa]
-            else:
-                continue
         else:
             continue
 
@@ -514,13 +492,10 @@ def merge_assembled_into_df(df_can: pd.DataFrame, assembled_msgs: list):
     return combined
 
 # -------------------------
-# Lookup loader (JSON first, Excel fallback), preserving WorkshopActions
+# Lookup loader (JSON-only), preserving WorkshopActions
 # -------------------------
 @st.cache_resource
-def load_dtc_lookup(excel_path: str = EXCEL_DTC_PATH,
-                    sheet: str = EXCEL_SHEET,
-                    header_row: int = EXCEL_HEADER_ROW,
-                    json_cache: str = JSON_LOOKUP_PATH):
+def load_dtc_lookup(json_cache: str = JSON_LOOKUP_PATH):
     def _safe_int(x):
         try:
             if x is None or (isinstance(x, float) and pd.isna(x)):
@@ -529,113 +504,62 @@ def load_dtc_lookup(excel_path: str = EXCEL_DTC_PATH,
         except Exception:
             return None
 
-    # JSON fast-path
-    if json_cache and os.path.exists(json_cache):
-        try:
-            with open(json_cache, "r", encoding="utf-8") as f:
-                items = json.load(f)
-            if not isinstance(items, list):
-                st.warning(f"⚠️ JSON lookup must be a list, got {type(items)} — falling back to Excel.")
-                raise ValueError("JSON is not a list")
-
-            lookup = {}
-            skipped = 0
-            for x in items:
-                spn = _safe_int(x.get("SPN"))
-                fmi = _safe_int(x.get("FMI"))
-                if spn is None or fmi is None:
-                    skipped += 1
-                    continue
-
-                name = x.get("Name") or ""
-                title = x.get("Title") or ""
-                component = x.get("Component") or ""
-                dtc = x.get("DTC") or ""
-
-                desc = x.get("Description")
-                if not desc:
-                    parts = [p for p in [title, name, component] if p]
-                    desc = " | ".join(parts)
-
-                entry = {
-                    "SPN": spn,
-                    "FMI": fmi,
-                    "DTC": dtc,
-                    "Name": name,
-                    "Title": title,
-                    "Component": component,
-                    "Description": desc,
-                    "Error Class": x.get("Error Class", ""),
-                    "Source": x.get("Source", ""),
-                    "Extra": x.get("Extra", {}),
-                    # keep unified WorkshopActions
-                    "WorkshopActions": x.get("WorkshopActions", None),
-                }
-                # Fallback if ABS-only "WorkshopAction" is inside Extra
-                if not entry["WorkshopActions"]:
-                    extra = entry.get("Extra") or {}
-                    wa = extra.get("WorkshopAction")
-                    if wa:
-                        entry["WorkshopActions"] = [wa] if isinstance(wa, str) else wa
-
-                lookup[(spn, fmi)] = entry
-
-            st.info(f"📚 Loaded {len(lookup)} DTC entries from JSON (skipped {skipped} without SPN/FMI).")
-            return lookup
-
-        except Exception as e:
-            st.warning(f"⚠️ JSON lookup read failed ('{json_cache}'): {e}. Falling back to Excel…")
-
-    # Excel fallback (minimal)
-    try:
-        df = pd.read_excel(excel_path, sheet_name=sheet, header=header_row)
-    except Exception as e:
-        st.warning(f"⚠️ Could not open Excel '{excel_path}': {e}")
+    if not json_cache or not os.path.exists(json_cache):
+        st.warning(f"⚠️ DTC JSON not found at '{json_cache}'. Lookup disabled.")
         return {}
 
-    # Try to find the SPN-FMI column
-    col_spn_fmi = next((c for c in df.columns if str(c).strip().upper() == 'DTC SAE (SPN-FMI)'), None)
-    if not col_spn_fmi:
-        for c in df.columns:
-            cu = str(c).upper()
-            if "SPN" in cu and "FMI" in cu:
-                col_spn_fmi = c
-                break
-    if not col_spn_fmi:
-        st.warning("⚠️ Could not find 'DTC SAE (SPN-FMI)' column in Excel. DTC lookup disabled.")
+    try:
+        with open(json_cache, "r", encoding="utf-8") as f:
+            items = json.load(f)
+        if not isinstance(items, list):
+            st.error("❌ DTC JSON must be a list of entries.")
+            return {}
+    except Exception as e:
+        st.error(f"❌ Failed to read DTC JSON: {e}")
         return {}
 
     lookup = {}
-    for _, row in df.iterrows():
-        sf = row.get(col_spn_fmi)
-        if pd.isna(sf):
-            continue
-        m = re.search(r'(\d+)\s*[-/,\s]\s*(\d+)', str(sf))
-        if not m:
-            continue
-        spn = _safe_int(m.group(1))
-        fmi = _safe_int(m.group(2))
+    skipped = 0
+    for x in items:
+        spn = _safe_int(x.get("SPN"))
+        fmi = _safe_int(x.get("FMI"))
         if spn is None or fmi is None:
+            skipped += 1
             continue
+
+        name = x.get("Name") or ""
+        title = x.get("Title") or ""
+        component = x.get("Component") or ""
+        dtc = x.get("DTC") or ""
+
+        desc = x.get("Description")
+        if not desc:
+            parts = [p for p in [title, name, component] if p]
+            desc = " | ".join(parts)
 
         entry = {
             "SPN": spn,
             "FMI": fmi,
-            "DTC": row.get("DTC", "") or "",
-            "Name": row.get("Name", "") or "",
-            "Title": row.get("Title", "") or "",
-            "Component": row.get("Component", "") or "",
-            "Description": "",
-            "Error Class": row.get("Error Class", "") or "",
-            "Source": "ExcelFallback",
-            "Extra": {},
-            "WorkshopActions": None,
+            "DTC": dtc,
+            "Name": name,
+            "Title": title,
+            "Component": component,
+            "Description": desc,
+            "Error Class": x.get("Error Class", ""),
+            "Source": x.get("Source", ""),
+            "Extra": x.get("Extra", {}),
+            "WorkshopActions": x.get("WorkshopActions", None),
         }
-        parts = [p for p in [entry["Title"], entry["Name"], entry["Component"]] if p and str(p) != "nan"]
-        entry["Description"] = " | ".join(parts) if parts else ""
+        # Fallback for ABS-only JSONs if WorkshopActions missing but Extra.WorkshopAction present
+        if not entry["WorkshopActions"]:
+            extra = entry.get("Extra") or {}
+            wa = extra.get("WorkshopAction")
+            if wa:
+                entry["WorkshopActions"] = [wa] if isinstance(wa, str) else wa
+
         lookup[(spn, fmi)] = entry
 
-    st.info(f"📄 Built {len(lookup)} DTC entries from Excel.")
+    st.info(f"📚 Loaded {len(lookup)} DTC entries from JSON (skipped {skipped} without SPN/FMI).")
     return lookup
 
 DTC_LOOKUP = load_dtc_lookup()
@@ -695,7 +619,7 @@ def decode_dtcs_from_df(df: pd.DataFrame) -> pd.DataFrame:
                 "Title": entry.get("Title", "") or entry.get("Name", ""),
                 "Description": entry.get("Description", "Unknown (not in lookup)"),
                 "Error Class": entry.get("Error Class", ""),
-                "Workshop Actions": _format_workshop_actions(entry),  # NEW column
+                "Workshop Actions": _format_workshop_actions(entry),
                 "MIL": lamp.get("MIL"),
                 "RSL": lamp.get("RSL"),
                 "AWL": lamp.get("AWL"),
