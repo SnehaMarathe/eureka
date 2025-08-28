@@ -839,16 +839,16 @@ def generate_detailed_diagnosis(ecu_name: str):
 # -------------------------
 # Wiring PDF parsing (grounds & connector-pin→ground)
 # -------------------------
-# Stricter ground label: exactly 3 digits (e.g., G101), avoid long IDs in title blocks
-GROUND_REGEX = re.compile(r"(?<![A-Z0-9-])G([1-9]\d{2})(?!\d)", re.IGNORECASE)
+# Ground label: allow 3–4 digits (e.g., G101, G4379) and avoid title-block false positives
+GROUND_REGEX = re.compile(r"(?<![A-Z0-9-])G([1-9]\d{2,4})(?!\d)", re.IGNORECASE)
 # Alternate notations sometimes used in drawings
 GROUND_ALT_REGEXES = [
-    re.compile(r"(?<![A-Z0-9-])G-?([1-9]\d{2})(?!\d)", re.IGNORECASE),
-    re.compile(r"(?<![A-Z0-9-])GND[\s\-]*([1-9]\d{2})(?!\d)", re.IGNORECASE),
+    re.compile(r"(?<![A-Z0-9-])G-?\s*([1-9]\d{2,4})(?!\d)", re.IGNORECASE),
+    re.compile(r"(?<![A-Z0-9-])GND[\s\-]*([1-9]\d{2,4})(?!\d)", re.IGNORECASE),
 ]
 # Example connector/pin→ground pattern
 CONN_PIN_GROUND_REGEX = re.compile(
-    r"(?:(?:Conn(?:ector)?)[\s:]*|(?:\bC\b)?)([A-Za-z0-9\-_/ ]{1,20})\s*(?:pin|PIN|Pin)\s*([0-9]{1,3})[^A-Za-z0-9]+(G[1-9]\d{2})\b",
+    r"(?:(?:Conn(?:ector)?)[\s:]*|(?:\bC\b)?)([A-Za-z0-9\-_/ ]{1,20})\s*(?:pin|PIN|Pin)\s*([0-9]{1,3})[^A-Za-z0-9]+(G-?\s*[1-9]\d{2,4})\b",
     re.IGNORECASE
 )
 
@@ -1760,3 +1760,4 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
