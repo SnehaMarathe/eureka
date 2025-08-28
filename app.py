@@ -1,3 +1,4 @@
+# app.py — EurekaCheck Unified Diagnostic Tool
 # TP/BAM reassembly + DM1 with corrected lamp parsing + Clean DM1 table
 # Firebase upload (ECU presence, DTCs) + Wiring/Ground Heuristics
 # + Wiring PDF parsing to extract ground labels and connector-pin→ground mappings
@@ -19,33 +20,35 @@ import time
 import json
 import requests
 
-_ = None
-
-# Optional: PDF parsers for wiring drawings
+# -------------------------
+# PDF backends (prefer PyMuPDF → pdfplumber → PyPDF2)
+# -------------------------
 PDF_BACKEND = None
 try:
-    import pdfplumber  # best for coordinates
-    PDF_BACKEND = "pdfplumber"
+    import fitz  # PyMuPDF
+    PDF_BACKEND = "pymupdf"
 except Exception:
     try:
-        from PyPDF2 import PdfReader  # text-only fallback
-        PDF_BACKEND = "pypdf2"
+        import pdfplumber
+        PDF_BACKEND = "pdfplumber"
     except Exception:
-        PDF_BACKEND = None
+        try:
+            from PyPDF2 import PdfReader
+            PDF_BACKEND = "pypdf2"
+        except Exception:
+            PDF_BACKEND = None
 
-# --- OCR / PDF fallbacks (optional but recommended) ---
-try:
-    from pdf2image import convert_from_path
-    import pytesseract
-    OCR_AVAILABLE = True
-except Exception:
-    OCR_AVAILABLE = False
+st.info(f"📄 Using PDF backend: {PDF_BACKEND or 'none'}")
 
+# -------------------------
 # Firebase
+# -------------------------
 import firebase_admin
 from firebase_admin import credentials, firestore
 
+# -------------------------
 # Optional PCAN/live CAN support
+# -------------------------
 try:
     import can
     PCAN_AVAILABLE = True
@@ -838,14 +841,12 @@ def generate_detailed_diagnosis(ecu_name: str):
 # -------------------------
 # Stricter ground label: exactly 3 digits (e.g., G101), avoid long IDs in title blocks
 GROUND_REGEX = re.compile(r"(?<![A-Z0-9-])G([1-9]\d{2})(?!\d)", re.IGNORECASE)
-
 # Alternate notations sometimes used in drawings
 GROUND_ALT_REGEXES = [
     re.compile(r"(?<![A-Z0-9-])G-?([1-9]\d{2})(?!\d)", re.IGNORECASE),
     re.compile(r"(?<![A-Z0-9-])GND[\s\-]*([1-9]\d{2})(?!\d)", re.IGNORECASE),
 ]
-
-# Example connector/pin→ground pattern: "Connector 3 Pin 4 -> G201" or "89E pin 2 — G203"
+# Example connector/pin→ground pattern
 CONN_PIN_GROUND_REGEX = re.compile(
     r"(?:(?:Conn(?:ector)?)[\s:]*|(?:\bC\b)?)([A-Za-z0-9\-_/ ]{1,20})\s*(?:pin|PIN|Pin)\s*([0-9]{1,3})[^A-Za-z0-9]+(G[1-9]\d{2})\b",
     re.IGNORECASE
@@ -888,7 +889,6 @@ def parse_pdfs_for_grounds_and_mappings(paths):
         else:
             snippet = ""
         bbox = None
-        # Try to locate exact token for coords
         if words:
             token = g.upper()
             for w in words:
@@ -902,8 +902,40 @@ def parse_pdfs_for_grounds_and_mappings(paths):
     for p in paths:
         try:
             file_path = p
-            if PDF_BACKEND == "pdfplumber":
-                import pdfplumber
+            if PDF_BACKEND == "pymupdf":
+                try:
+                    doc = fitz.open(file_path)
+                    for page_idx in range(len(doc)):
+                        page = doc[page_idx]
+                        text = page.get_text("text") or ""
+                        words_raw = page.get_text("words") or []
+                        words = [
+                            {"x0": w[0], "top": w[1], "x1": w[2], "bottom": w[3], "text": w[4]}
+                            for w in words_raw
+                            if len(w) >= 5
+                        ]
+
+                        for m in GROUND_REGEX.finditer(text):
+                            _emit_ground(m.group(1), text, words, file_path, page_idx + 1, m.start(), m.end())
+                        for alt in GROUND_ALT_REGEXES:
+                            for m in alt.finditer(text):
+                                _emit_ground(m.group(1), text, words, file_path, page_idx + 1, m.start(), m.end())
+
+                        for m in CONN_PIN_GROUND_REGEX.finditer(text):
+                            connector = (m.group(1) or "").strip()
+                            pin = m.group(2)
+                            ground = m.group(3).upper()
+                            ctx_start = max(0, m.start() - 40)
+                            ctx_end = min(len(text), m.end() + 40)
+                            context = text[ctx_start:ctx_end].replace("\n", " ")
+                            results["conn_pin_ground"].append({
+                                "file": file_path, "page": page_idx + 1, "connector": connector,
+                                "pin": pin, "ground": ground, "context": context, "coords": None
+                            })
+                except Exception as e:
+                    st.warning(f"⚠️ PyMuPDF parse failed for '{os.path.basename(p)}': {e}")
+
+            elif PDF_BACKEND == "pdfplumber":
                 with pdfplumber.open(file_path) as pdf:
                     for page_idx, page in enumerate(pdf.pages, start=1):
                         try:
@@ -912,15 +944,12 @@ def parse_pdfs_for_grounds_and_mappings(paths):
                         except Exception:
                             words, text = [], ""
 
-                        # Ground labels (primary)
                         for m in GROUND_REGEX.finditer(text):
                             _emit_ground(m.group(1), text, words, file_path, page_idx, m.start(), m.end())
-                        # Ground labels (alternates)
                         for alt in GROUND_ALT_REGEXES:
                             for m in alt.finditer(text):
                                 _emit_ground(m.group(1), text, words, file_path, page_idx, m.start(), m.end())
 
-                        # Connector/pin -> ground (exact pattern)
                         for m in CONN_PIN_GROUND_REGEX.finditer(text):
                             connector = (m.group(1) or "").strip()
                             pin = m.group(2)
@@ -933,7 +962,7 @@ def parse_pdfs_for_grounds_and_mappings(paths):
                                 "ground": ground, "context": context, "coords": None
                             })
 
-                        # Row-based mining (common in “Pin / Signal / Ground” tables)
+                        # Row-based mining (line-level heuristics)
                         try:
                             rows_by_y = defaultdict(list)
                             for w in words or []:
@@ -955,20 +984,17 @@ def parse_pdfs_for_grounds_and_mappings(paths):
                             pass
 
             elif PDF_BACKEND == "pypdf2":
-                from PyPDF2 import PdfReader
                 reader = PdfReader(file_path)
                 for page_idx, page in enumerate(reader.pages, start=1):
                     try:
                         text = page.extract_text() or ""
                     except Exception:
                         text = ""
-
                     for m in GROUND_REGEX.finditer(text):
                         _emit_ground(m.group(1), text, None, file_path, page_idx, m.start(), m.end())
                     for alt in GROUND_ALT_REGEXES:
                         for m in alt.finditer(text):
                             _emit_ground(m.group(1), text, None, file_path, page_idx, m.start(), m.end())
-
                     for m in CONN_PIN_GROUND_REGEX.finditer(text):
                         connector = (m.group(1) or "").strip()
                         pin = m.group(2)
@@ -980,45 +1006,8 @@ def parse_pdfs_for_grounds_and_mappings(paths):
                             "file": file_path, "page": page_idx, "connector": connector, "pin": pin,
                             "ground": ground, "context": context, "coords": None
                         })
-
             else:
-                st.warning("⚠️ No PDF backend available. Install `pdfplumber` or `PyPDF2` to enable parsing.")
-
-            # OCR fallback (only if needed / available)
-            if OCR_AVAILABLE:
-                # If we found very few mappings, try OCR to scrape text from vector pages
-                low_hits = (sum(len(v) for v in results["grounds"].values()) < 3) and (len(results["conn_pin_ground"]) == 0)
-                if low_hits:
-                    try:
-                        images = convert_from_path(file_path, dpi=300)
-                        for page_idx, img in enumerate(images, start=1):
-                            ocr_text = pytesseract.image_to_string(img)
-
-                            for m in GROUND_REGEX.finditer(ocr_text):
-                                _emit_ground(m.group(1), ocr_text, None, file_path, page_idx, m.start(), m.end())
-                            for alt in GROUND_ALT_REGEXES:
-                                for m in alt.finditer(ocr_text):
-                                    _emit_ground(m.group(1), ocr_text, None, file_path, page_idx, m.start(), m.end())
-
-                            # Heuristic OCR connector/pin/ground lines
-                            for line in ocr_text.splitlines():
-                                if ("conn" in line.lower() or "connector" in line.lower()) and "pin" in line.lower() and "g" in line.lower():
-                                    m = re.search(
-                                        r"(?:connector|conn)\s*([A-Za-z0-9\-_/ ]{1,20}).*?(?:pin)\s*([0-9]{1,3}).*?(G-?\s*[1-9]\d{2})",
-                                        line, re.IGNORECASE
-                                    )
-                                    if m:
-                                        connector = m.group(1).strip()
-                                        pin = re.sub(r"\D", "", m.group(2))
-                                        ground = "G" + re.sub(r"\D", "", m.group(3))
-                                        results["conn_pin_ground"].append({
-                                            "file": file_path, "page": page_idx,
-                                            "connector": connector, "pin": pin, "ground": ground,
-                                            "context": line.strip(), "coords": None
-                                        })
-                    except Exception as e:
-                        st.warning(f"⚠️ OCR fallback failed for '{os.path.basename(file_path)}': {e}")
-
+                st.warning("⚠️ No PDF backend available. Install `PyMuPDF`, `pdfplumber`, or `PyPDF2` to enable parsing.")
         except Exception as e:
             st.warning(f"⚠️ Failed parsing '{os.path.basename(p)}': {e}")
             continue
@@ -1612,7 +1601,6 @@ def infer_wiring_faults(raw_dtcs_df: pd.DataFrame) -> list:
                 hconn = (hit.get("connector") or "").strip().lower()
                 if not hconn: continue
                 if conn_lower and (conn_lower in hconn or hconn in conn_lower):
-                    # Prefer matching ground if available
                     if not zone["Ground"] or (hit.get("ground") == zone["Ground"]):
                         pin_hints.append(f"Pin {hit.get('pin')} → {hit.get('ground')} ({os.path.basename(hit.get('file',''))} p.{hit.get('page')})")
         if pin_hints:
@@ -1702,7 +1690,7 @@ for ecu in ecu_connector_map.keys():
         "Effective Ground": (st.session_state.get("dynamic_ground_map") or {}).get(ecu, ground_map_default.get(ecu, "—"))
     })
 df_gmap = pd.DataFrame(g_rows)
-st.dataframe(df_gmap,use_container_width=True)
+st.dataframe(df_gmap, use_container_width=True)
 
 # Export options
 col_a, col_b = st.columns(2)
@@ -1772,7 +1760,3 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
-
-
-
-
