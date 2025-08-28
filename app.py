@@ -20,35 +20,31 @@ import time
 import json
 import requests
 
-# -------------------------
-# PDF backends (prefer PyMuPDF → pdfplumber → PyPDF2)
-# -------------------------
+# Optional: PDF parsers for wiring drawings
 PDF_BACKEND = None
 try:
-    import fitz  # PyMuPDF
-    PDF_BACKEND = "pymupdf"
+    import pdfplumber  # best for coordinates
+    PDF_BACKEND = "pdfplumber"
 except Exception:
     try:
-        import pdfplumber
-        PDF_BACKEND = "pdfplumber"
+        from PyPDF2 import PdfReader  # text-only fallback
+        PDF_BACKEND = "pypdf2"
     except Exception:
-        try:
-            from PyPDF2 import PdfReader
-            PDF_BACKEND = "pypdf2"
-        except Exception:
-            PDF_BACKEND = None
+        PDF_BACKEND = None
 
-st.info(f"📄 Using PDF backend: {PDF_BACKEND or 'none'}")
+# --- OCR / PDF fallbacks (optional but recommended) ---
+try:
+    from pdf2image import convert_from_path
+    import pytesseract
+    OCR_AVAILABLE = True
+except Exception:
+    OCR_AVAILABLE = False
 
-# -------------------------
 # Firebase
-# -------------------------
 import firebase_admin
 from firebase_admin import credentials, firestore
 
-# -------------------------
 # Optional PCAN/live CAN support
-# -------------------------
 try:
     import can
     PCAN_AVAILABLE = True
@@ -319,7 +315,6 @@ ecu_connector_map = {
 }
 
 drawing_map = {
-    # Default drawings known in project
     "Connector 3": "PEE0000014_K.pdf",
     "Connector 4": "PEE0000014_K.pdf",
     "F46": "PEE0000014_K.pdf",
@@ -839,16 +834,24 @@ def generate_detailed_diagnosis(ecu_name: str):
 # -------------------------
 # Wiring PDF parsing (grounds & connector-pin→ground)
 # -------------------------
-# Ground label: allow 3–4 digits (e.g., G101, G4379) and avoid title-block false positives
+# Ground label: allow 3–4 digits (e.g., G101, G4379), avoid title-block false positives
 GROUND_REGEX = re.compile(r"(?<![A-Z0-9-])G([1-9]\d{2,4})(?!\d)", re.IGNORECASE)
-# Alternate notations sometimes used in drawings
 GROUND_ALT_REGEXES = [
     re.compile(r"(?<![A-Z0-9-])G-?\s*([1-9]\d{2,4})(?!\d)", re.IGNORECASE),
     re.compile(r"(?<![A-Z0-9-])GND[\s\-]*([1-9]\d{2,4})(?!\d)", re.IGNORECASE),
 ]
-# Example connector/pin→ground pattern
+
+# Connector/pin → ground patterns (relaxed + variants)
 CONN_PIN_GROUND_REGEX = re.compile(
-    r"(?:(?:Conn(?:ector)?)[\s:]*|(?:\bC\b)?)([A-Za-z0-9\-_/ ]{1,20})\s*(?:pin|PIN|Pin)\s*([0-9]{1,3})[^A-Za-z0-9]+(G-?\s*[1-9]\d{2,4})\b",
+    r"(?:(?:Conn(?:ector)?)[\s:]*|(?:\bC\b)?)([A-Za-z0-9\-_/ ]{1,20})\s*(?:pin|p|PIN|Pin)\s*([0-9]{1,3})[^A-Za-z0-9]+(G-?\s*[1-9]\d{2,4})\b",
+    re.IGNORECASE
+)
+CONN_PIN_GROUND_REGEX_2 = re.compile(
+    r"\b([A-Za-z0-9\-_/]{2,20})\b.*?\b(?:pin|p)\s*([0-9]{1,3})\b.*?\b(G-?\s*[1-9]\d{2,4})\b",
+    re.IGNORECASE
+)
+CONN_PIN_GROUND_REGEX_3 = re.compile(
+    r"\b(?:pin|p)\s*([0-9]{1,3})\b.*?(?:->|→|to|-|—|–)\s*\b(G-?\s*[1-9]\d{2,4})\b.*?\b([A-Za-z0-9\-_/]{2,20})\b",
     re.IGNORECASE
 )
 
@@ -902,40 +905,8 @@ def parse_pdfs_for_grounds_and_mappings(paths):
     for p in paths:
         try:
             file_path = p
-            if PDF_BACKEND == "pymupdf":
-                try:
-                    doc = fitz.open(file_path)
-                    for page_idx in range(len(doc)):
-                        page = doc[page_idx]
-                        text = page.get_text("text") or ""
-                        words_raw = page.get_text("words") or []
-                        words = [
-                            {"x0": w[0], "top": w[1], "x1": w[2], "bottom": w[3], "text": w[4]}
-                            for w in words_raw
-                            if len(w) >= 5
-                        ]
-
-                        for m in GROUND_REGEX.finditer(text):
-                            _emit_ground(m.group(1), text, words, file_path, page_idx + 1, m.start(), m.end())
-                        for alt in GROUND_ALT_REGEXES:
-                            for m in alt.finditer(text):
-                                _emit_ground(m.group(1), text, words, file_path, page_idx + 1, m.start(), m.end())
-
-                        for m in CONN_PIN_GROUND_REGEX.finditer(text):
-                            connector = (m.group(1) or "").strip()
-                            pin = m.group(2)
-                            ground = m.group(3).upper()
-                            ctx_start = max(0, m.start() - 40)
-                            ctx_end = min(len(text), m.end() + 40)
-                            context = text[ctx_start:ctx_end].replace("\n", " ")
-                            results["conn_pin_ground"].append({
-                                "file": file_path, "page": page_idx + 1, "connector": connector,
-                                "pin": pin, "ground": ground, "context": context, "coords": None
-                            })
-                except Exception as e:
-                    st.warning(f"⚠️ PyMuPDF parse failed for '{os.path.basename(p)}': {e}")
-
-            elif PDF_BACKEND == "pdfplumber":
+            if PDF_BACKEND == "pdfplumber":
+                import pdfplumber
                 with pdfplumber.open(file_path) as pdf:
                     for page_idx, page in enumerate(pdf.pages, start=1):
                         try:
@@ -943,17 +914,21 @@ def parse_pdfs_for_grounds_and_mappings(paths):
                             text = page.extract_text() or ""
                         except Exception:
                             words, text = [], ""
+                        # Normalize punctuation/spaces so regexes match more often
+                        text = (text or "").replace("\u2013","-").replace("\u2014","-").replace("\xa0"," ")
 
+                        # Ground labels (primary + alternates)
                         for m in GROUND_REGEX.finditer(text):
                             _emit_ground(m.group(1), text, words, file_path, page_idx, m.start(), m.end())
                         for alt in GROUND_ALT_REGEXES:
                             for m in alt.finditer(text):
                                 _emit_ground(m.group(1), text, words, file_path, page_idx, m.start(), m.end())
 
+                        # Connector/pin -> ground (exact + relaxed)
                         for m in CONN_PIN_GROUND_REGEX.finditer(text):
                             connector = (m.group(1) or "").strip()
                             pin = m.group(2)
-                            ground = m.group(3).upper()
+                            ground = (m.group(3) or "").upper().replace(" ", "")
                             ctx_start = max(0, m.start() - 40)
                             ctx_end = min(len(text), m.end() + 40)
                             context = text[ctx_start:ctx_end].replace("\n", " ")
@@ -961,44 +936,76 @@ def parse_pdfs_for_grounds_and_mappings(paths):
                                 "file": file_path, "page": page_idx, "connector": connector, "pin": pin,
                                 "ground": ground, "context": context, "coords": None
                             })
+                        for m in CONN_PIN_GROUND_REGEX_2.finditer(text):
+                            results["conn_pin_ground"].append({
+                                "file": file_path, "page": page_idx,
+                                "connector": (m.group(1) or "").strip(),
+                                "pin": m.group(2),
+                                "ground": (m.group(3) or "").upper().replace(" ", ""),
+                                "context": m.group(0).replace("\n"," "),
+                                "coords": None
+                            })
+                        for m in CONN_PIN_GROUND_REGEX_3.finditer(text):
+                            results["conn_pin_ground"].append({
+                                "file": file_path, "page": page_idx,
+                                "connector": (m.group(3) or "").strip(),
+                                "pin": m.group(1),
+                                "ground": (m.group(2) or "").upper().replace(" ", ""),
+                                "context": m.group(0).replace("\n"," "),
+                                "coords": None
+                            })
 
-                        # Row-based mining (line-level heuristics)
+                        # Row-based mining from word rows
                         try:
                             rows_by_y = defaultdict(list)
                             for w in words or []:
                                 y = round(w.get("top", 0), 1)
                                 rows_by_y[y].append(w)
                             for y, ws in rows_by_y.items():
-                                line = " ".join(w["text"] for w in sorted(ws, key=lambda z: z.get("x0", 0)))
-                                m = re.search(
-                                    r"(?:connector|conn)\s*([A-Za-z0-9\-_/ ]{1,20}).*?\bpin\b\s*([0-9]{1,3}).*?\b(G[1-9]\d{2})\b",
-                                    line, re.IGNORECASE
+                                line = " ".join(
+                                    (w.get("text","") or "")
+                                    for w in sorted(ws, key=lambda z: z.get("x0", 0))
                                 )
-                                if m:
+                                line = line.replace("\u2013","-").replace("\u2014","-").replace("\xa0"," ")
+                                for rx in (CONN_PIN_GROUND_REGEX, CONN_PIN_GROUND_REGEX_2, CONN_PIN_GROUND_REGEX_3):
+                                    m = rx.search(line)
+                                    if not m:
+                                        continue
+                                    if rx is CONN_PIN_GROUND_REGEX_3:
+                                        pin, ground, connector = m.group(1), m.group(2), m.group(3)
+                                    else:
+                                        connector, pin, ground = m.group(1), m.group(2), m.group(3)
                                     results["conn_pin_ground"].append({
                                         "file": file_path, "page": page_idx,
-                                        "connector": m.group(1).strip(), "pin": m.group(2),
-                                        "ground": m.group(3).upper(), "context": line, "coords": None
+                                        "connector": (connector or "").strip(),
+                                        "pin": pin,
+                                        "ground": (ground or "").upper().replace(" ", ""),
+                                        "context": line.strip(),
+                                        "coords": None
                                     })
                         except Exception:
                             pass
 
             elif PDF_BACKEND == "pypdf2":
+                from PyPDF2 import PdfReader
                 reader = PdfReader(file_path)
                 for page_idx, page in enumerate(reader.pages, start=1):
                     try:
                         text = page.extract_text() or ""
                     except Exception:
                         text = ""
+                    text = text.replace("\u2013","-").replace("\u2014","-").replace("\xa0"," ")
+
                     for m in GROUND_REGEX.finditer(text):
                         _emit_ground(m.group(1), text, None, file_path, page_idx, m.start(), m.end())
                     for alt in GROUND_ALT_REGEXES:
                         for m in alt.finditer(text):
                             _emit_ground(m.group(1), text, None, file_path, page_idx, m.start(), m.end())
+
                     for m in CONN_PIN_GROUND_REGEX.finditer(text):
                         connector = (m.group(1) or "").strip()
                         pin = m.group(2)
-                        ground = m.group(3).upper()
+                        ground = (m.group(3) or "").upper().replace(" ", "")
                         ctx_start = max(0, m.start() - 40)
                         ctx_end = min(len(text), m.end() + 40)
                         context = text[ctx_start:ctx_end].replace("\n", " ")
@@ -1006,8 +1013,61 @@ def parse_pdfs_for_grounds_and_mappings(paths):
                             "file": file_path, "page": page_idx, "connector": connector, "pin": pin,
                             "ground": ground, "context": context, "coords": None
                         })
+                    for m in CONN_PIN_GROUND_REGEX_2.finditer(text):
+                        results["conn_pin_ground"].append({
+                            "file": file_path, "page": page_idx,
+                            "connector": (m.group(1) or "").strip(),
+                            "pin": m.group(2),
+                            "ground": (m.group(3) or "").upper().replace(" ", ""),
+                            "context": m.group(0).replace("\n"," "),
+                            "coords": None
+                        })
+                    for m in CONN_PIN_GROUND_REGEX_3.finditer(text):
+                        results["conn_pin_ground"].append({
+                            "file": file_path, "page": page_idx,
+                            "connector": (m.group(3) or "").strip(),
+                            "pin": m.group(1),
+                            "ground": (m.group(2) or "").upper().replace(" ", ""),
+                            "context": m.group(0).replace("\n"," "),
+                            "coords": None
+                        })
+
             else:
-                st.warning("⚠️ No PDF backend available. Install `PyMuPDF`, `pdfplumber`, or `PyPDF2` to enable parsing.")
+                st.warning("⚠️ No PDF backend available. Install `pdfplumber` or `PyPDF2` to enable parsing.")
+
+            # OCR fallback (only if needed / available)
+            if OCR_AVAILABLE:
+                low_hits = (sum(len(v) for v in results["grounds"].values()) < 3) and (len(results["conn_pin_ground"]) == 0)
+                if low_hits:
+                    try:
+                        images = convert_from_path(file_path, dpi=300)
+                        for page_idx, img in enumerate(images, start=1):
+                            ocr_text = pytesseract.image_to_string(img)
+                            ocr_text = ocr_text.replace("\u2013","-").replace("\u2014","-").replace("\xa0"," ")
+
+                            for m in GROUND_REGEX.finditer(ocr_text):
+                                _emit_ground(m.group(1), ocr_text, None, file_path, page_idx, m.start(), m.end())
+                            for alt in GROUND_ALT_REGEXES:
+                                for m in alt.finditer(ocr_text):
+                                    _emit_ground(m.group(1), ocr_text, None, file_path, page_idx, m.start(), m.end())
+
+                            for rx in (CONN_PIN_GROUND_REGEX, CONN_PIN_GROUND_REGEX_2, CONN_PIN_GROUND_REGEX_3):
+                                for m in rx.finditer(ocr_text):
+                                    if rx is CONN_PIN_GROUND_REGEX_3:
+                                        pin, ground, connector = m.group(1), m.group(2), m.group(3)
+                                    else:
+                                        connector, pin, ground = m.group(1), m.group(2), m.group(3)
+                                    results["conn_pin_ground"].append({
+                                        "file": file_path, "page": page_idx,
+                                        "connector": (connector or "").strip(),
+                                        "pin": re.sub(r"\D","", str(pin)),
+                                        "ground": ("G" + re.sub(r"\D","", str(ground))).upper(),
+                                        "context": m.group(0).replace("\n"," "),
+                                        "coords": None
+                                    })
+                    except Exception as e:
+                        st.warning(f"⚠️ OCR fallback failed for '{os.path.basename(file_path)}': {e}")
+
         except Exception as e:
             st.warning(f"⚠️ Failed parsing '{os.path.basename(p)}': {e}")
             continue
@@ -1335,6 +1395,7 @@ else:
 # -------------------------
 st.markdown("---")
 st.subheader("📑 Auto-parse Wiring PDFs (Grounds & Connector Pins)")
+st.caption(f"📄 Using PDF backend: {PDF_BACKEND or 'none'}")
 
 available = list_available_drawings()
 selected = st.multiselect("Select drawings to parse", options=available, default=available)
@@ -1760,4 +1821,5 @@ st.markdown(
     """,
     unsafe_allow_html=True
 )
+
 
