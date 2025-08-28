@@ -6,9 +6,6 @@ reportlab
 python-can==4.3.1
 firebase-admin
 streamlit-javascript
+PyMuPDF
 pdfplumber
 PyPDF2
-pdf2image
-pytesseract
-Pillow
-numpy
